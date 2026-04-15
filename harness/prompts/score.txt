@@ -1,0 +1,14 @@
+You are reviewing a C source file from a network daemon for security relevance.
+Rate this file from 1 to 5 based on how likely it is to contain exploitable security vulnerabilities:
+
+1 = No attack surface (constants, generated code, build scripts)
+2 = Minimal surface (simple utilities, no external input)
+3 = Some surface (internal logic with limited input handling)
+4 = Significant surface (parses structured data, manages memory, handles network input)
+5 = High surface (raw network input parsing, authentication, dynamic allocation based on untrusted sizes)
+
+Respond with ONLY a single integer 1–5. No explanation.
+
+File: {filename}
+Contents:
+{file_contents}
