@@ -6,7 +6,7 @@
 <hr>
 
 <p>
-<strong>A (shoddy) OSS recreation of <a href="https://red.anthropic.com/2026/mythos-preview/">Anthropic's Mythos Preview</a> Cybersecurity harness* that locates and verifes memory-safety vulnerabilities in C/C++ codebases.</strong>
+<strong>A (shoddy) OSS recreation of <a href="https://red.anthropic.com/2026/mythos-preview/">Anthropic's Mythos Preview</a> cybersecurity harness* that locates and verifes memory-safety vulnerabilities in C/C++ codebases.</strong>
 </p>
 
 <blockquote>
