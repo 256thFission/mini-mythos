@@ -150,13 +150,13 @@ orchestrator.py          main loop
 So far, I've worked with [miniupnpd](https://github.com/miniupnp/miniupnp) as a test repo, and managed to recreate historic CVEs on older checkouts.
 For novel work, the $20 opus plan has unearthed a global buffer overflow in `miniupnpd.c` remotely-triggered if running with a non-default config option. 
 
-**Notes:*
+**Notes:**
 -  Anthropic Models are surprisingly willing to just FIND vulnerabilities and write triggers in this setting. Anccetodally, very low refusal rate when prompting them to find and write trigger scripts inside this automated harness.
 - Wrapping the Claude Code CLI directly is a massive shortcut. It might be too heavy and warrent changes later, but it's a SOTA agent scaffolding for a reason and mirrors what Anthropic reported in their tests.
 
 Experimenting with better harnesses to test current model capabilities seems promising, with Opus [already finding live Firefox vulnerabilities] (https://www.anthropic.com/news/mozilla-firefox-security)
 
-**Planned improvements/ experiments*
+**Planned improvements/ experiments**
 - Semantic taint analysis before the main agent to focus the search space
 - Joern tools for call-graph analysis and reachability checks
 - AST-Aware context trimming 
