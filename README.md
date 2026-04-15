@@ -1,41 +1,38 @@
-# MiniMythos
+<div align="center">
 
-A minimal (Shoddy) OSS recreation of [Anthropic's Claude Mythos Preview](https://red.anthropic.com/2026/mythos-preview/), an autonomous harness that finds and confirms real memory-safety vulnerabilities in C/C++ codebases.
+# Mini-Mythos
 
-Their design is almost stupid simple:
+<img width="600" alt="minimythos" src="https://github.com/user-attachments/assets/c57d4342-9a94-490a-8c15-83cf64bade3e" />
+<hr>
 
+<p>
+<strong>A (shoddy) OSS recreation of <a href="https://red.anthropic.com/2026/mythos-preview/">Anthropic's Mythos Preview</a> harness* that locates and verifes memory-safety vulnerabilities in C/C++ codebases.</strong>
+</p>
+
+<blockquote>
+<sub>*AGI not included, results may vary, side effects may inlcude the end of all software, ludicrous api bills and/or anthropic account bans (probably not but I wouldn't say never ;-;)</sub>
+</blockquote>
+<hr>
+</div>
+
+**Anthropic's Design is Stupidly Simple**
 1. Rank every file 1-5 
 2. Spin up a Docker container with an ASan-instrumented build
 3. Prompt Claude Code with that file to 'find an exploit bro' and report back a defect with a reproduction script.
 4. Have a Judge critic the finding for BS
 5. Repeat for EVERY FILE
 
-that's it.
+**that's it.**
 
-Because I am poor, and this *IS* perhaps too stupidly simple we also added:
+## Okay, Why? Does it work?
+Obviously, *I do not have access to Claude Mythos*. This project is an experiment in 'baking a cake without flour'.
 
-- A Dead-code 'prefilter' that compiles the binary and identifes files with zero exported symbols and dead functions with zero invocations. 
-  Claude really seems to like wasting effort on commented legacy code never touched in default builds, so we skip those.  
-- Resumability/ budget caps
-
-
-# Why do this?
-
-Well, it doesn't take a genius to figure out that 'rate every file 1-5' is likely NOT the best way to automate zero-day-discovery.
-I want to expierment with the capabilities frontier models could reach with the right tools and guidance; Off the top of my head,
-
-- Semantic taint analysis before the main agent to focus the search space
-- Joern tools for call-graph analysis and reachability checks
-- AST-Aware context trimming 
-- Patch churn targeting
+The hypothesis is that, with a reasonable harness, you don't need it. 
+It doesn't take a genius to realize 'rate every file 1-5' is likely NOT best way to automate zero-day-discovery, and specialized tools + scaffolding might hold the key to better performance. Besides, Long term, big compute + historic CVEs + OSS git checkpoints is a perfect RL sandbox for tuninng agentic cyber-sec tools.
 
 
-So far, I've worked with [miniupnpd](https://github.com/miniupnp/miniupnp) as a test repo, and managed to recreate historic CVEs on older checkouts. On the head checkout, the most impressive feat is a global buffer overflow in `miniupnpd.c`  ...triggered via a non default config option. 
+View [Current Progress](#current-progress) to read current progress & yapping. 
 
-
- Obviously, PRs and issues welcome. See [Contributing](#contributing).
-
----
 
 ## Quickstart
 
@@ -147,6 +144,22 @@ orchestrator.py          main loop
 ```
 
 
+## Current Progress
 
-Working end-to-end on [miniupnpd](https://github.com/miniupnp/miniupnp) at commit `f83b5e2`. The harness has autonomously found and sanitizer-confirmed real memory-safety defects.
+So far, I've worked with [miniupnpd](https://github.com/miniupnp/miniupnp) as a test repo, and managed to recreate historic CVEs on older checkouts.
+For novel work, the $20 opus plan has unearthed a global buffer overflow in `miniupnpd.c` remotely-triggered if running with a non-default config option. 
 
+**Notes:*
+-  Anthropic Models are surprisingly willing to just FIND vulnerabilities and write triggers in this setting. Anccetodally, very low refusal rate when prompting them to find and write trigger scripts inside this automated harness.
+- Wrapping the Claude Code CLI directly is a massive shortcut. It might be too heavy and warrent changes later, but it's a SOTA agent scaffolding for a reason and mirrors what Anthropic reported in their tests.
+
+Experimenting with better harnesses to test current model capabilities seems promising, with Opus [already finding live Firefox vulnerabilities] (https://www.anthropic.com/news/mozilla-firefox-security)
+
+**Planned improvements/ experiments*
+- Semantic taint analysis before the main agent to focus the search space
+- Joern tools for call-graph analysis and reachability checks
+- AST-Aware context trimming 
+- Patch churn targeting
+- Adding wrappers for Codex and OpenCode to benchmark performance against Claude
+
+Obviously, PRs and issues welcome. See [Contributing](#contributing).
