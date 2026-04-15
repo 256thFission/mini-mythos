@@ -42,6 +42,13 @@ class RunResult:
     model: str = AUDIT_MODEL
     error_message: str = ""
     transcript_events: list = field(default_factory=list)
+    session_id: str = ""
+
+
+RESUME_CONTINUATION_PROMPT = (
+    "The previous session was interrupted by an API error. "
+    "Please continue your security analysis and provide your final JSON verdict when complete."
+)
 
 
 RETRY_HANDOFF_HEADER = """
@@ -157,6 +164,7 @@ def run_audit(
     claude_home: str | None = None,
     retry_handoff: str | None = None,
     retry_number: int = 0,
+    resume_session_id: str | None = None,
 ) -> RunResult:
     """Execute one audit run via the claude CLI. Returns a populated RunResult."""
     source_dir = Path(source_dir)
@@ -185,7 +193,7 @@ def run_audit(
 
     # Use centralized claude_client
     claude_result = invoke_claude(
-        prompt=prompt,
+        prompt=RESUME_CONTINUATION_PROMPT if resume_session_id else prompt,
         model=model,
         timeout=RUN_TIMEOUT_SEC,
         output_format="stream-json",
@@ -197,6 +205,7 @@ def run_audit(
         container_home=config.CONTAINER_HOME,
         claude_home=claude_home,
         verbose=True,
+        resume_session_id=resume_session_id,
     )
 
     duration = time.time() - start
@@ -239,6 +248,7 @@ def run_audit(
             raw_stderr=claude_result.stderr[:10_000],
             duration_seconds=round(duration, 1),
             error_message="api_terminated",
+            session_id=claude_result.session_id,
         )
         _log_run(run_id, filename, file_score, model, result, tracker, harness_flags, target=target)
         return result
@@ -351,6 +361,7 @@ def _log_run(
         "diagnostic_trigger": result.diagnostic_trigger or None,
         "no_finding_reason": result.no_finding_reason or None,
         "error_message": result.error_message or None,
+        "session_id": result.session_id or None,
         "raw_stderr": result.raw_stderr,
         # raw_stdout not stored in JSONL (see transcript file instead)
     }

@@ -99,7 +99,7 @@ class RunConfig:
     JUDGE_MODEL: str = "claude-sonnet-4-6"
 
     # Timeouts
-    RUN_TIMEOUT_SEC: int = 1200
+    RUN_TIMEOUT_SEC: int = 1800
     SCORE_TIMEOUT_SEC: int = 120
     JUDGE_TIMEOUT_SEC: int = 200
 

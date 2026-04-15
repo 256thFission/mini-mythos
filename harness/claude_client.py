@@ -28,6 +28,7 @@ class ClaudeResult:
     output_tokens: int = 0
     tool_calls: list[dict] | None = None
     result_subtype: str = ""  # e.g. "success", "error_max_turns"
+    session_id: str = ""
 
 
 def _strip_env(env: dict[str, str] | None = None) -> dict[str, str]:
@@ -46,16 +47,20 @@ def _build_claude_args(
     output_format: str = "stream-json",
     max_turns: int | None = None,
     max_budget_usd: float | None = None,
+    resume_session_id: str | None = None,
 ) -> list[str]:
     """Build the base claude CLI arguments."""
-    cmd = [
-        "claude",
-        "-p", prompt,
-        "--model", model,
-        "--output-format", output_format,
-        "--dangerously-skip-permissions",
-        "--no-session-persistence",
-    ]
+    cmd = ["claude"]
+    if resume_session_id:
+        cmd.extend(["--resume", resume_session_id])
+        if prompt:
+            cmd.extend(["-p", prompt])
+        cmd.extend(["--model", model, "--output-format", output_format,
+                    "--dangerously-skip-permissions"])
+        # Omit --no-session-persistence when resuming so the session remains accessible.
+    else:
+        cmd.extend(["-p", prompt, "--model", model, "--output-format", output_format,
+                    "--dangerously-skip-permissions", "--no-session-persistence"])
     if max_turns is not None:
         cmd.extend(["--max-turns", str(max_turns)])
     if max_budget_usd is not None:
@@ -76,6 +81,7 @@ def invoke_claude(
     container_home: str = "/audit-home",
     claude_home: str | None = None,
     verbose: bool = False,
+    resume_session_id: str | None = None,
 ) -> ClaudeResult:
     """Invoke the claude CLI and return a structured result.
 
@@ -102,6 +108,7 @@ def invoke_claude(
         output_format=output_format,
         max_turns=max_turns,
         max_budget_usd=max_budget_usd,
+        resume_session_id=resume_session_id,
     )
     if verbose:
         base_cmd.append("--verbose")
@@ -152,6 +159,7 @@ def invoke_claude(
             result.output_tokens = parsed["output_tokens"]
             result.tool_calls = parsed["tool_calls"]
             result.result_subtype = parsed["result_subtype"]
+            result.session_id = parsed["session_id"]
         elif output_format == "json":
             # Parse simple JSON envelope
             try:
@@ -200,6 +208,7 @@ def _parse_stream_json(raw_stdout: str) -> dict[str, Any]:
     output_tokens = 0
     tool_calls = []
     result_subtype = ""
+    session_id = ""
     pending_tool_uses: dict[str, dict] = {}
 
     for line in raw_stdout.splitlines():
@@ -243,6 +252,7 @@ def _parse_stream_json(raw_stdout: str) -> dict[str, Any]:
             usage = event.get("usage", {}) or {}
             input_tokens = int(usage.get("input_tokens", 0))
             output_tokens = int(usage.get("output_tokens", 0))
+            session_id = event.get("session_id", "")
             result_text = event.get("result", "")
             if event.get("is_error"):
                 result_subtype = "error_api_terminated"
@@ -259,4 +269,5 @@ def _parse_stream_json(raw_stdout: str) -> dict[str, Any]:
         "output_tokens": output_tokens,
         "tool_calls": tool_calls,
         "result_subtype": result_subtype,
+        "session_id": session_id,
     }

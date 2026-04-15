@@ -104,6 +104,32 @@ def _load_skip_set(target: TargetConfig) -> set[str]:
     return skip
 
 
+def _load_interrupted_sessions(target: TargetConfig) -> dict[str, str]:
+    """Return {filename: session_id} for files whose most recent audit run was api_terminated.
+
+    Only files where the last logged entry has error_message='api_terminated' and a non-empty
+    session_id are returned. Files with a later successful/intractable/confirmed entry are
+    excluded automatically because iteration keeps only the last entry per file.
+    """
+    audit_log = config.audit_log_path(target.name)
+    if not audit_log.exists():
+        return {}
+    latest: dict[str, dict] = {}
+    for line in audit_log.read_text().splitlines():
+        try:
+            e = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        fname = e.get("target_file")
+        if fname:
+            latest[fname] = e
+    return {
+        fname: entry["session_id"]
+        for fname, entry in latest.items()
+        if entry.get("error_message") == "api_terminated" and entry.get("session_id")
+    }
+
+
 def _create_artifact_dir(run_id: str, filepath: Path, file_score: int) -> Path:
     """Create artifact directory for a run and copy source file.
 
@@ -259,6 +285,9 @@ def run_pipeline(
     skip_set = _load_skip_set(target)
     if skip_set:
         print(f"[orchestrator] Skipping {len(skip_set)} already-resolved file(s): {sorted(skip_set)}")
+    interrupted_sessions = _load_interrupted_sessions(target)
+    if interrupted_sessions:
+        print(f"[orchestrator] Resumable interrupted session(s): {sorted(interrupted_sessions)}")
     runs_dispatched = 0
     confirmed = False
     halt = False  # set True to break outer loop without claiming a confirmed finding
@@ -297,6 +326,10 @@ def run_pipeline(
         # ── Per-file retry loop ────────────────────────────────
         retry_count = 0
         retry_handoff = None
+        # Use saved session from a prior interrupted run (first attempt only).
+        pending_resume_session_id = interrupted_sessions.pop(filepath.name, None)
+        if pending_resume_session_id:
+            print(f"  [resuming interrupted session {pending_resume_session_id[:8]}...]")
 
         while True:
             if not tracker.can_dispatch(estimated_cost=runner_mod.PER_RUN_BUDGET_USD):
@@ -315,6 +348,9 @@ def run_pipeline(
             _create_artifact_dir(run_id, filepath, score)
 
             # ── Audit agent ────────────────────────────────
+            # Consume the saved session_id on the first attempt only.
+            resume_session_id = pending_resume_session_id
+            pending_resume_session_id = None
             result = runner_mod.run_audit(
                 source_dir=source_dir,
                 filename=filepath.name,
@@ -326,6 +362,7 @@ def run_pipeline(
                 claude_home=claude_home,
                 retry_handoff=retry_handoff,
                 retry_number=retry_count,
+                resume_session_id=resume_session_id,
             )
             runs_dispatched += 1
 
@@ -338,6 +375,14 @@ def run_pipeline(
                 print(
                     f"  [HALTING — usage limit reached. "
                     f"Wait for API usage to reset, then rerun.]"
+                )
+                halt = True
+                break
+
+            if result.status == "error" and result.error_message == "api_terminated":
+                print(
+                    f"  [HALTING — API terminated session unexpectedly. "
+                    f"This is likely transient. Rerun to retry this file.]"
                 )
                 halt = True
                 break
