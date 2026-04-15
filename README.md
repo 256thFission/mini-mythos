@@ -25,7 +25,7 @@
 
 **that's it.**
 
-## Okay, Why remake that.? Does it work?
+## Okay, Why remake that? Does it work?
 Obviously, *I do not have access to Claude Mythos*. This project is an experiment in 'baking a cake without flour'. 
 
 The hypothesis is that, with a reasonable harness, you don't need it. 
