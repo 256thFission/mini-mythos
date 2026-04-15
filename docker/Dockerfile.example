@@ -1,0 +1,92 @@
+# MiniMythos — Example Dockerfile for a new target
+#
+# Copy this file to your target directory, rename it to Dockerfile,
+# and fill in the sections marked with TODO.
+#
+# The container must provide:
+#   1. The target source tree at a fixed path, checked out to a specific commit
+#   2. A build instrumented with ASan + UBSan (clang -fsanitize=address,undefined)
+#   3. A reachable_symbols.json extracted from the compiled .o files
+#   4. Node.js + the claude CLI (for agents to run natively inside the container)
+#   5. A non-root user named "audit" with read/write access to the source tree
+#
+# After building: docker build -t minimythos_<name>:latest .
+# After running:  docker run -d --name minimythos_<name> minimythos_<name>:latest
+#                 docker cp minimythos_<name>:/path/to/src/. src/
+#                 docker cp minimythos_<name>:/path/to/src/reachable_symbols.json \
+#                           runs/targets/<name>/reachable_symbols.json
+
+FROM ubuntu:24.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+# ── System packages ───────────────────────────────────────────────────────────
+# TODO: add any project-specific build dependencies (e.g. libssl-dev, zlib1g-dev)
+RUN apt-get update && apt-get install -y \
+    gcc \
+    clang \
+    make \
+    cmake \
+    gdb \
+    git \
+    python3 \
+    python3-pip \
+    curl \
+    && rm -rf /var/lib/apt/lists/*
+
+# ── Clone target repository ───────────────────────────────────────────────────
+# TODO: replace with your target's repo URL and install path
+RUN git clone https://github.com/OWNER/REPO.git /opt/target
+
+WORKDIR /opt/target
+
+# TODO: replace with the exact commit hash you want to audit
+RUN git checkout <COMMIT_HASH>
+
+# ── Build with ASan + UBSan instrumentation ───────────────────────────────────
+# TODO: replace with the build commands for your project.
+#       Always use clang with -fsanitize=address,undefined so Gate A can detect bugs.
+#
+# Autotools example:
+#   RUN ./configure && make CC=clang \
+#       CFLAGS="-O1 -g -fno-omit-frame-pointer -fsanitize=address,undefined" \
+#       LDFLAGS="-fsanitize=address,undefined"
+#
+# CMake example:
+#   RUN cmake -B build -DCMAKE_C_COMPILER=clang \
+#       -DCMAKE_C_FLAGS="-O1 -g -fno-omit-frame-pointer -fsanitize=address,undefined" \
+#       -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=address,undefined" \
+#       && cmake --build build -j$(nproc)
+
+# ── Extract reachable symbols (dead-code filtering) ───────────────────────────
+# This scans compiled .o files and maps each source file to its exported symbols.
+# The harness uses this to skip files with zero live symbols before LLM scoring.
+#
+# TODO: update the glob pattern if .o files are in a subdirectory (e.g. build/*.o)
+RUN python3 -c "\
+import json, subprocess, glob, os; \
+result = {}; \
+for obj in sorted(glob.glob('**/*.o', recursive=True)): \
+    src = os.path.basename(obj).replace('.o', '.c'); \
+    out = subprocess.run(['nm', '-g', '--defined-only', obj], capture_output=True, text=True); \
+    funcs = [l.split()[-1] for l in out.stdout.splitlines() if ' T ' in l]; \
+    result[src] = funcs; \
+json.dump(result, open('reachable_symbols.json','w'), indent=2); \
+print(f'Wrote reachable_symbols.json: {len(result)} files, {sum(len(v) for v in result.values())} symbols')"
+
+# ── Install Node.js and claude CLI ────────────────────────────────────────────
+# Agents run natively inside the container via docker exec.
+RUN apt-get update && apt-get install -y nodejs npm \
+    && npm install -g @anthropic-ai/claude-code \
+    && rm -rf /var/lib/apt/lists/*
+
+# ── Non-root audit user ───────────────────────────────────────────────────────
+# claude CLI refuses --dangerously-skip-permissions as root.
+# TODO: update the chown path to match your source tree location
+RUN useradd -m -s /bin/bash audit \
+    && mkdir -p /audit-home \
+    && chown -R audit:audit /audit-home \
+    && chown -R audit:audit /opt/target
+
+# Keep container alive for docker exec
+CMD ["tail", "-f", "/dev/null"]

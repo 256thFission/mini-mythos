@@ -106,24 +106,33 @@ def run_pipeline(
     print(f"  budget     : ${hard_budget:.2f}")
     print(f"  container  : {target.container_name}")
     print(f"  dry_run    : {dry_run}")
+    if skip_docker:
+        print()
+        print("  NOTE: --skip-docker is active.")
+        print("    Gate A (trigger execution) will be SKIPPED.")
+        print("    The audit agent and judge still run inside Docker via 'docker exec'.")
+        print("    The container must be running for agents to work.")
     print()
 
     # ── Container health check ───────────────────────────────────────
-    if not skip_docker and not dry_run:
+    # NOTE: --skip-docker only skips Gate A (trigger execution).
+    # Agents always run inside Docker, so we always need the container.
+    if not dry_run:
         if not verifier_mod.container_is_running(target.container_name):
             print(f"[orchestrator] Container '{target.container_name}' not running — attempting start ...")
             ok = verifier_mod.start_container(image=target.container_image, name=target.container_name)
             if not ok:
                 print(
-                    "[orchestrator] WARNING: container could not be started.\n"
-                    "  Gate A (trigger execution) will be skipped.\n"
-                    f"  Run: docker build -t {target.container_image} targets/{target.name}/ && "
-                    f"docker run -d --name {target.container_name} {target.container_image}"
+                    "[orchestrator] ERROR: container could not be started.\n"
+                    "  Audit agents run inside Docker — the container is required.\n"
+                    f"  Build and start it first:\n"
+                    f"    docker build -t {target.container_image} targets/{target.name}/\n"
+                    f"    docker run -d --name {target.container_name} {target.container_image}"
                 )
-                skip_docker = True
+                sys.exit(1)
 
         # Copy claude auth into container so agents run natively without docker exec
-        if not skip_docker and claude_home:
+        if claude_home:
             print(f"[orchestrator] Copying claude auth into container ...")
             verifier_mod.copy_claude_auth(
                 target.container_name, claude_home, container_home=config.CONTAINER_HOME
@@ -192,10 +201,14 @@ def run_pipeline(
         print(f"[orchestrator] Skipping {len(skip_set)} already-resolved file(s): {sorted(skip_set)}")
     runs_dispatched = 0
     confirmed = False
+    halt = False  # set True to break outer loop without claiming a confirmed finding
 
     for filepath, score in scored_files:
         if confirmed:
             print("[orchestrator] Confirmed finding — halting dispatch.")
+            break
+
+        if halt:
             break
 
         if max_runs is not None and runs_dispatched >= max_runs:
@@ -228,7 +241,7 @@ def run_pipeline(
         while True:
             if not tracker.can_dispatch(estimated_cost=runner_mod.PER_RUN_BUDGET_USD):
                 print("[orchestrator] Budget exhausted mid-retry — halting.")
-                confirmed = True   # use confirmed flag to break outer loop
+                halt = True
                 break
 
             run_id = str(uuid.uuid4())
@@ -266,7 +279,7 @@ def run_pipeline(
                     f"  [HALTING — usage limit reached. "
                     f"Wait for API usage to reset, then rerun.]"
                 )
-                confirmed = True   # use confirmed flag to break outer loop
+                halt = True
                 break
 
             if result.status in ("error", "declined"):
@@ -302,11 +315,11 @@ def run_pipeline(
             if judge_result.verdict == "CONFIRMED":
                 # ── Gate A: trigger execution ───────────────────────
                 if skip_docker:
-                    print("  [Gate A SKIPPED — Docker unavailable]")
+                    print("  [Gate A SKIPPED — --skip-docker flag is set]")
                     _append_audit_log({
                         "run_id": run_id,
                         "event": "gate_a_skipped",
-                        "reason": "docker not available",
+                        "reason": "--skip-docker flag",
                     }, target=target)
                     break
 
@@ -386,7 +399,7 @@ def run_pipeline(
                         f"  [Judge: HALTING — usage limit reached. "
                         f"Wait for API usage to reset, then rerun.]"
                     )
-                    confirmed = True   # use confirmed flag to break outer loop
+                    halt = True
                 else:
                     print(f"  [Judge: ERROR — {judge_result.reasoning[:200]}]")
                     _append_audit_log({
@@ -405,6 +418,8 @@ def run_pipeline(
     print(f"  Total spend     : ${tracker.spent():.3f}")
     print(f"  Budget remaining: ${tracker.remaining():.3f}")
     print(f"  Confirmed       : {confirmed}")
+    if halt and not confirmed:
+        print(f"  Halted early    : True (usage limit or budget exhausted)")
     print(f"  Audit log       : {config.audit_log_path(target.name)}")
 
 
@@ -441,7 +456,9 @@ def main():
     )
     parser.add_argument(
         "--skip-docker", action="store_true",
-        help="Skip Gate A trigger execution (useful when Docker is unavailable)"
+        help="Skip Gate A trigger execution only. The audit agent and judge still run "
+             "inside Docker via 'docker exec'. Use this when you want agent output "
+             "without executing potentially dangerous trigger scripts."
     )
     _default_claude_home = str(Path.home())
     parser.add_argument(

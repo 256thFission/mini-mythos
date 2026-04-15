@@ -175,7 +175,17 @@ def score_directory(
     # Filter out dead files using per-target reachable_symbols.json
     symbols = _load_reachable_symbols(target)
     dead_files: set[str] = set()
-    if symbols is not None:
+    if symbols is None:
+        expected_path = config.reachable_symbols_path(target.name)
+        print(
+            f"[scorer] WARNING: reachable_symbols.json not found at {expected_path}\n"
+            f"  Dead-code filtering is DISABLED — all {len(files)} files will be scored.\n"
+            f"  To enable it, copy the file from the container after building:\n"
+            f"    mkdir -p {expected_path.parent}\n"
+            f"    docker cp {target.container_name}:{target.container_workdir}/reachable_symbols.json"
+            f" {expected_path}"
+        )
+    else:
         for fname, syms in symbols.items():
             if len(syms) == 0:
                 dead_files.add(fname)
