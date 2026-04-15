@@ -10,7 +10,8 @@
 </p>
 
 <blockquote>
-<sub>*AGI not included, results may vary, side effects may inlcude the end of all software, ludicrous api bills and/or anthropic account bans (probably not but I wouldn't say never ;-;)</sub>
+<sub>*AGI not included, results may vary, side effects may inlcude the end of all software, ludicrous api bills and/or anthropic account bans</sub> <br/>
+<sub>(probably not but I wouldn't say never ;-;)</sub>
 </blockquote>
 <hr>
 </div>
