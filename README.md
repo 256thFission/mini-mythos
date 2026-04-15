@@ -25,13 +25,13 @@
 
 **that's it.**
 
-## Okay, Why? Does it work?
-Obviously, *I do not have access to Claude Mythos*. This project is an experiment in 'baking a cake without flour'.
+## Okay, Why remake that.? Does it work?
+Obviously, *I do not have access to Claude Mythos*. This project is an experiment in 'baking a cake without flour'. 
 
 The hypothesis is that, with a reasonable harness, you don't need it. 
 It doesn't take a genius to realize 'rate every file 1-5' is likely NOT best way to automate zero-day-discovery, and specialized tools + scaffolding might hold the key to better performance. Besides, Long term, big compute + historic CVEs + OSS git checkpoints is a perfect RL sandbox for tuninng agentic cyber-sec tools.
 
-
+As for it working, early results are positive.
 View [Current Progress](#current-progress) to read current progress & yapping. 
 
 
