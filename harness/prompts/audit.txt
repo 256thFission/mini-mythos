@@ -32,5 +32,5 @@ If after thorough empirical testing you find nothing, respond with ONLY a valid 
 }
 
 Respond ONLY with the JSON object. No markdown fences, no conversational filler, no XML tags.
-
+{dead_functions}
 Focus file: {filename}

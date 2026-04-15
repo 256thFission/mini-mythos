@@ -14,6 +14,7 @@ from pathlib import Path
 import budget as budget_mod
 from claude_client import invoke_claude
 from config import config, TargetConfig
+import preprocessor as preprocessor_mod
 
 
 AUDIT_PROMPT_PATH = config.PROMPTS_DIR / "audit.txt"
@@ -61,6 +62,7 @@ def _load_prompt(
     filename: str,
     target: TargetConfig,
     retry_handoff: str | None = None,
+    dead_fn_annotation: str = "",
 ) -> str:
     template = AUDIT_PROMPT_PATH.read_text()
     prompt = (
@@ -69,6 +71,7 @@ def _load_prompt(
         .replace("{project_name}", target.name)
         .replace("{project_description}", target.description)
         .replace("{source_dir}", target.container_workdir)
+        .replace("{dead_functions}", dead_fn_annotation)
     )
     if retry_handoff:
         prompt = prompt + RETRY_HANDOFF_HEADER.replace("{retry_handoff}", retry_handoff)
@@ -160,7 +163,15 @@ def run_audit(
     if harness_flags is None:
         harness_flags = []
 
-    prompt = _load_prompt(filename, target=target, retry_handoff=retry_handoff)
+    compiled_symbols = preprocessor_mod.load_symbols_for_file(filename, target)
+    dead_fn_annotation = preprocessor_mod.dead_function_annotation(
+        Path(source_dir) / filename, compiled_symbols
+    )
+    prompt = _load_prompt(
+        filename, target=target,
+        retry_handoff=retry_handoff,
+        dead_fn_annotation=dead_fn_annotation,
+    )
 
     # Reset container workdir to clean state before each run so test artifacts
     # from prior runs don't bias the agent toward already-explored paths.
@@ -216,6 +227,18 @@ def run_audit(
             raw_stderr=claude_result.stderr[:10_000],
             duration_seconds=round(duration, 1),
             error_message="max_turns_exceeded",
+        )
+        _log_run(run_id, filename, file_score, model, result, tracker, harness_flags, target=target)
+        return result
+
+    # Detect API-level session termination (is_error=True on result event).
+    if claude_result.result_subtype == "error_api_terminated":
+        result = RunResult(
+            status="error",
+            raw_stdout=claude_result.stdout[:50_000],
+            raw_stderr=claude_result.stderr[:10_000],
+            duration_seconds=round(duration, 1),
+            error_message="api_terminated",
         )
         _log_run(run_id, filename, file_score, model, result, tracker, harness_flags, target=target)
         return result

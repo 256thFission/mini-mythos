@@ -11,6 +11,7 @@ the container_workdir from the target spec.
 import argparse
 import json
 import shutil
+import subprocess
 import sys
 import uuid
 from datetime import datetime, timezone
@@ -23,6 +24,65 @@ import scorer as scorer_mod
 import runner as runner_mod
 import validator as validator_mod
 import verifier as verifier_mod
+
+
+def _ensure_source_dir(target: TargetConfig, override: str | None) -> Path:
+    """Resolve the host-side source directory for *target*.
+
+    Resolution order:
+      1. ``--source-dir`` CLI override (must exist)
+      2. ``sources/<target>/`` local cache — cloned from repo_url at repo_revision
+         if the directory doesn't exist yet, or if it exists but is at the wrong
+         revision it is updated via ``git checkout``.
+      3. Fallback to container_workdir (old behaviour, errors if path absent)
+    """
+    if override:
+        p = Path(override)
+        if not p.exists():
+            print(f"[orchestrator] ERROR: --source-dir {p} does not exist.")
+            sys.exit(1)
+        return p
+
+    if target.repo_url:
+        cache_root = config.source_cache_dir(target.name)
+        build_subdir = cache_root / target.build_dir if target.build_dir else cache_root
+
+        if not cache_root.exists():
+            print(f"[orchestrator] Cloning {target.repo_url} → {cache_root} ...")
+            result = subprocess.run(
+                ["git", "clone", "--quiet", target.repo_url, str(cache_root)],
+                capture_output=True, text=True,
+            )
+            if result.returncode != 0:
+                print(f"[orchestrator] ERROR: git clone failed:\n{result.stderr}")
+                sys.exit(1)
+
+        if target.repo_revision:
+            current = subprocess.run(
+                ["git", "-C", str(cache_root), "rev-parse", "HEAD"],
+                capture_output=True, text=True,
+            ).stdout.strip()
+            if not current.startswith(target.repo_revision) and not target.repo_revision.startswith(current):
+                print(f"[orchestrator] Checking out {target.repo_revision[:12]} in {cache_root} ...")
+                result = subprocess.run(
+                    ["git", "-C", str(cache_root), "checkout", "--quiet", target.repo_revision],
+                    capture_output=True, text=True,
+                )
+                if result.returncode != 0:
+                    print(f"[orchestrator] ERROR: git checkout failed:\n{result.stderr}")
+                    sys.exit(1)
+
+        if not build_subdir.exists():
+            print(f"[orchestrator] ERROR: build_dir '{target.build_dir}' not found inside cloned repo at {cache_root}.")
+            sys.exit(1)
+        return build_subdir
+
+    p = Path(target.container_workdir)
+    if not p.exists():
+        print(f"[orchestrator] ERROR: source_dir {p} does not exist.")
+        print("  → Add repo_url/repo_revision to target.toml, or pass --source-dir.")
+        sys.exit(1)
+    return p
 
 
 def _load_skip_set(target: TargetConfig) -> set[str]:
@@ -469,7 +529,7 @@ def main():
     args = parser.parse_args()
 
     target = load_target(args.target)
-    source_dir = args.source_dir or target.container_workdir
+    source_dir = _ensure_source_dir(target, args.source_dir)
 
     run_pipeline(
         target=target,

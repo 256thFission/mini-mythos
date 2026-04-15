@@ -162,25 +162,17 @@ cython_debug/
 # VS Code
 .vscode/
 
-# Project specific
-runs/*.jsonl
-runs/*.log
-runs/*.json
-runs/*.bak*
-runs/outputs/
-runs/transcripts/
-runs/judge_transcripts/
-runs/artifacts/
-runs/evaluation_package/
+# Project specific - ignore all run artifacts but keep directory structure
+runs/**/*
+!runs/.gitkeep
 .DS_Store
 Thumbs.db
 
 # Local cache directories
 .audit-home/
 .claude/
-
-# miniupnpd subrepo (upstream source code)
 src/
+sources/
 
 # Docker
 .dockerignore

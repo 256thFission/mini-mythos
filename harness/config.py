@@ -29,6 +29,7 @@ class TargetConfig:
     container_workdir: str
     repo_url: str = ""
     repo_revision: str = ""
+    build_dir: str = ""
 
 
 def load_target(name: str | None = None) -> TargetConfig:
@@ -78,6 +79,7 @@ def load_target(name: str | None = None) -> TargetConfig:
         container_workdir=docker.get("workdir", ""),
         repo_url=build.get("repo_url", ""),
         repo_revision=build.get("repo_revision", ""),
+        build_dir=build.get("build_dir", ""),
     )
 
 
@@ -151,6 +153,9 @@ class RunConfig:
 
     def reachable_symbols_path(self, target_name: str) -> Path:
         return self.target_runs_dir(target_name) / "reachable_symbols.json"
+
+    def source_cache_dir(self, target_name: str) -> Path:
+        return self.BASE_DIR / "sources" / target_name
 
 
 # Module-level singleton instance - import this everywhere

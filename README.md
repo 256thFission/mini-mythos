@@ -1,75 +1,106 @@
 # MiniMythos
 
-A thin CLI harness that runs Claude Code autonomously against a C/C++ codebase to find real, sanitizer-confirmed memory-safety vulnerabilities.
+A minimal (Shoddy) OSS recreation of [Anthropic's Claude Mythos Preview](https://red.anthropic.com/2026/mythos-preview/), an autonomous harness that finds and confirms real memory-safety vulnerabilities in C/C++ codebases.
 
-Inspired by Anthropic's Claude Mythos Preview scaffold: an isolated container, a one-paragraph audit prompt, and Claude Code doing the work.
+Their design is almost stupid simple:
+
+[the point is to show how simple their design is here;]
+The design is deliberately simple: a five-stage loop and ~1,500 lines of Python. Claude does the security research; the harness manages budget, orchestration, and verification.
 
 ---
 
-## What it does
+## How it works
 
-1. **Scores** source files 1–5 by attack-surface likelihood (cheap LLM call per file)
-2. **Audits** high-scored files with an autonomous Claude Code agent inside a Docker container (ASan/UBSan instrumented build)
-3. **Judges** any candidate finding with an independent agent (Gate B) — checks reachability, SL-1/SL-2/SL-3 slop filters
-4. **Executes** the verified trigger in the container and checks for sanitizer output (Gate A)
-5. **Logs** everything to an append-only JSONL file; resumes cleanly after interruption
+**1. Filter** source files against the compiled binary's symbol table (`reachable_symbols.json`, extracted via `nm` during the Docker build). Files with zero exported symbols are skipped entirely. For surviving files, [tree-sitter](https://tree-sitter.github.io/tree-sitter/) identifies individual functions absent from the binary and injects them as a prompt annotation — so the audit agent doesn't waste turns on dead code.
 
-The pipeline halts automatically when a confirmed defect is found or the budget cap is hit.
+**2. Score** surviving `.c`/`.h` files 1–5 for attack-surface likelihood using a cheap Haiku call per file. Scores are cached; re-runs skip already-scored files.
+
+**3. Audit** high-scored files by running Claude Opus autonomously inside an ASan/UBSan-instrumented Docker container. The agent has direct access to the binary, gdb, and the full source tree — it forms hypotheses, runs crafted inputs, inspects memory, and writes test programs until it either triggers a defect or exhausts its budget. It reports back a defect description and a verified shell script that reproduces the issue.
+
+**4. Judge (Gate B)** any candidate finding with an independent Claude Sonnet agent that re-investigates from scratch. It applies three rejection filters before confirming:
+
+- **Synthetic trigger**: does the reproduction script call the vulnerable function directly with fabricated arguments that no real network path would produce? If so, it's not a real attack.
+- **Sanitizer-only UB**: does the sanitizer fire, but the runtime behavior is identical on all realistic platforms anyway? (e.g. signed integer overflow that compilers handle predictably as two's-complement — the bug is a code quality issue, not a security finding.)
+- **Dead-code gate**: is the vulnerable code actually compiled into the default build, or gated behind a `#ifdef` that's never set?
+
+**5. Verify (Gate A)** confirmed findings by executing the trigger script verbatim in the container and checking stderr for ASan/UBSan output. No sanitizer signal = rejected.
+
+All events are written to an append-only JSONL log. The pipeline is **idempotent** — restarting resumes from the next unresolved file. It halts automatically on the first confirmed defect or when the budget cap is hit.
 
 ---
 
 ## Quick start
 
-### 1. Build the container
+### Prerequisites
 
-```bash
-docker build -t minimythos:0.1 docker/
-docker run -d --name minimythos_run minimythos:0.1
+- Docker
+- Python 3.9+ (`pip install -r requirements.txt`)
+- [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code) installed and authenticated (`claude /login`)
+
+### 1. Configure your target
+
+Create `targets/<name>/target.toml`:
+
+```toml
+[project]
+name = "myproject"
+description = "a short description"
+
+[docker]
+container_name = "minimythos_myproject"
+image = "minimythos_myproject:latest"
+workdir = "/opt/myproject"
+
+[build]
+repo_url = "https://github.com/example/myproject.git"
+repo_revision = "abc123"
+build_dir = "subdir"        # optional: subdirectory within the repo to audit
 ```
 
-### 2. Copy source files and symbol map to host
+### 2. Build the instrumented container
+
+Copy `docker/Dockerfile.example` to your target directory, fill in the build commands (autotools and CMake examples are included), then:
 
 ```bash
-mkdir -p src
-docker cp minimythos_run:/opt/miniupnp/miniupnpd/. src/
-
-mkdir -p runs/targets/miniupnpd
-docker cp minimythos_run:/opt/miniupnp/miniupnpd/reachable_symbols.json runs/targets/miniupnpd/
+docker build -t minimythos_myproject:latest targets/myproject/
+docker run -d --name minimythos_myproject minimythos_myproject:latest
 ```
 
-The symbol map is used to skip dead-code files before scoring (saves ~$1–2).
-
-### 3. Install Python dependencies
+### 3. Copy the symbol map to the host
 
 ```bash
-pip install -r requirements.txt   # only needed on Python < 3.11
+mkdir -p runs/targets/myproject
+docker cp minimythos_myproject:/opt/myproject/reachable_symbols.json \
+    runs/targets/myproject/reachable_symbols.json
 ```
 
-You also need the [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code) installed and authenticated (`claude /login`).
+This enables dead-code filtering and saves ~$1–2 in scoring costs. If you skip it, the harness will warn and score all files.
 
 ### 4. Run
 
 ```bash
 cd harness
-python3 -u orchestrator.py --source-dir ../src
+python3 -u orchestrator.py --target myproject
 ```
 
-**Useful flags:**
+If `repo_url` is set in `target.toml`, the orchestrator auto-clones the source on first run. Pass `--source-dir` to use a local checkout instead.
+
+**Flags:**
 
 | Flag | Purpose |
 |---|---|
 | `--max-runs N` | Stop after N audit runs |
-| `--dry-run` | Score files, print queue, no Claude calls |
+| `--dry-run` | Score files and print queue — no Claude calls |
 | `--skip-docker` | Skip Gate A trigger execution |
-| `--budget USD` | Override hard cap (default: $50) |
-| `--model MODEL` | Override audit model (default: `claude-opus-4-6`) |
+| `--budget USD` | Hard cap in USD (default: $50) |
+| `--model MODEL` | Audit model (default: `claude-opus-4-6`) |
 
 ---
 
 ## Monitoring
 
 ```bash
-# Live color log (recommended — run in a second terminal)
+# Live color log (run in a second terminal)
 python3 watch_run.py --tail
 
 # List completed runs
@@ -97,32 +128,9 @@ python3 show_run.py --judge <run_id>
 The pipeline is **idempotent**: re-running the same command resumes from the next unresolved file. To reset fully:
 
 ```bash
-rm runs/targets/miniupnpd/audit.jsonl
-rm runs/targets/miniupnpd/scores.json
+rm runs/targets/myproject/audit.jsonl
+rm runs/targets/myproject/scores.json
 ```
-
----
-
-## Adding a new target
-
-Create `targets/<name>/target.toml`:
-
-```toml
-[project]
-name = "myproject"
-description = "a short description"
-
-[docker]
-container_name = "minimythos_myproject"
-image = "minimythos_myproject:latest"
-workdir = "/opt/myproject"
-
-[build]
-repo_url = "https://github.com/example/myproject.git"
-repo_revision = "abc123"
-```
-
-Then write a `docker/Dockerfile` that clones the repo, builds with ASan, and runs the `reachable_symbols.json` extraction step (see the existing Dockerfile for the pattern). Pass `--target myproject` to the orchestrator.
 
 ---
 
@@ -130,7 +138,8 @@ Then write a `docker/Dockerfile` that clones the repo, builds with ASan, and run
 
 ```
 orchestrator.py          main loop
-  scorer.py              LLM file scoring (host-side claude)
+  preprocessor.py        dead-code filter (tree-sitter + symbol table)
+  scorer.py              LLM file scoring (host-side Claude)
   runner.py              audit agent dispatch (docker exec claude)
   validator.py           Gate B: independent judge agent
   verifier.py            Gate A: trigger execution + sanitizer check
@@ -138,28 +147,43 @@ orchestrator.py          main loop
   config.py              all settings (models, timeouts, budgets)
   prompts/
     score.txt            file scoring prompt
-    audit.txt            main audit prompt
+    audit.txt            audit agent prompt
     judge.txt            judge agent prompt
 ```
 
-The audit agent runs **inside** the container via `docker exec` — it has direct access to the compiled binary, gdb, and the full source tree. The harness coordinates from outside.
+The audit and judge agents run **inside** the container via `docker exec` — they have direct access to the compiled binary, gdb, and the full source tree. The harness coordinates from the host.
 
 ---
 
 ## Cost
 
-For `miniupnpd` (~72 source files):
+Ballpark for a ~70-file C project:
 
-- Scoring pass: ~$5 total (Haiku, one call per file)
-- Audit run: ~$1.50–$4.00 (Opus, up to 50 turns)
-- Judge run: ~$0.50–$2.00 (Sonnet)
+| Phase | Model | Cost |
+|---|---|---|
+| Scoring | Haiku | ~$0.05–0.10 / file |
+| Audit run | Opus | ~$1.50–4.00 / run |
+| Judge run | Sonnet | ~$0.50–2.00 / run |
 
-A full run to first confirmed finding typically costs $15–$30.
+A full run to first confirmed finding typically costs **$15–30**.
 
 ---
 
 ## Status
 
-Working end-to-end on `miniupnpd` at git hash `f83b5e2`. The harness has found and sanitizer-confirmed real CVEs autonomously.
+Working end-to-end on [miniupnpd](https://github.com/miniupnp/miniupnp) at commit `f83b5e2`. The harness has autonomously found and sanitizer-confirmed real memory-safety defects.
 
-Generalization to arbitrary C/C++ targets (pluggable Dockerfile, template prompts) is the next planned phase.
+Active work: better prompt engineering, smarter file selection, parallel audit runs. See open issues.
+
+---
+
+## Contributing
+
+The codebase is small and meant to be hackable. Good places to start:
+
+- **Prompts** — `harness/prompts/audit.txt` and `judge.txt` are the highest-leverage thing to improve. Better prompts = better findings.
+- **New targets** — add a `targets/<name>/target.toml` and a Dockerfile, send a PR. Feedback on the setup experience is especially useful.
+- **Pipeline improvements** — smarter scoring, parallel runs, tighter slop filter logic, better cost attribution.
+- **Bug reports** — if the harness crashes or produces nonsense, open an issue with your `audit.jsonl` and the command you ran.
+
+PRs and issues welcome.

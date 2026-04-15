@@ -244,9 +244,12 @@ def _parse_stream_json(raw_stdout: str) -> dict[str, Any]:
             input_tokens = int(usage.get("input_tokens", 0))
             output_tokens = int(usage.get("output_tokens", 0))
             result_text = event.get("result", "")
-            if result_text:
-                full_text_parts.append(result_text)
-            result_subtype = event.get("subtype", "")
+            if event.get("is_error"):
+                result_subtype = "error_api_terminated"
+            else:
+                if result_text:
+                    full_text_parts.append(result_text)
+                result_subtype = event.get("subtype", "")
 
     return {
         "events": events,

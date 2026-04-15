@@ -44,8 +44,14 @@ Is the vulnerable code compiled into the default build? Check both:
 (b) Object-level: find the compiled object file for the source (e.g. foo.c → foo.o)
     and run `nm -g --defined-only <path>/foo.o | grep <function_name>`. If the
     vulnerable function does not appear, it was preprocessed out.
-If either check shows the code is not compiled in the default configuration, the
-finding is INTRACTABLE with reason "dead code behind disabled compile flag [FLAG_NAME]".
+(c) Cross-package: if any cited caller lives in a different directory or sibling
+    package from the focus file (e.g. focus is in miniupnpd/ but caller is cited
+    in minissdpd/ or miniupnpc-libuv/), verify that package was built at all.
+    Run `ls <caller_dir>/<caller_file>.o`. If no .o exists, that package was not
+    compiled in the default build and the entire caller path is dead — regardless
+    of whether the code is syntactically reachable.
+If any check shows the code is not compiled in the default configuration, the
+finding is INTRACTABLE with reason "dead code — package <dir> not built".
 A bug in uncompiled code has no security impact.
 
 After you have done this work, respond with ONLY a valid JSON object.
@@ -54,7 +60,7 @@ For CONFIRMED findings:
 {
   "verdict": "CONFIRMED",
   "reasoning": "How you independently verified the finding. Cite specific tool output, caller analysis, and the realistic attack path. Do not summarize the claim — describe what YOU found.",
-  "verified_trigger": "The exact shell script you ran that produced sanitizer output. Must be self-contained and reproducible. Gate A will run THIS script, not the original analyst's trigger."
+  "verified_trigger": "EXECUTABLE BASH ONLY. This field is passed directly to bash -c. It MUST start with #!/bin/bash and contain only shell commands you have actually run and observed produce sanitizer output. Do NOT put prose, descriptions, or instructions here — bash cannot execute English sentences and a syntax error will cause Gate A to fail silently. Paste the exact script, nothing else."
 }
 
 For RETRY (the finding has flaws but the vulnerability might exist):
