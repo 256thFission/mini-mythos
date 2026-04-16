@@ -57,10 +57,9 @@ def _build_claude_args(
             cmd.extend(["-p", prompt])
         cmd.extend(["--model", model, "--output-format", output_format,
                     "--dangerously-skip-permissions"])
-        # Omit --no-session-persistence when resuming so the session remains accessible.
     else:
         cmd.extend(["-p", prompt, "--model", model, "--output-format", output_format,
-                    "--dangerously-skip-permissions", "--no-session-persistence"])
+                    "--dangerously-skip-permissions"])
     if max_turns is not None:
         cmd.extend(["--max-turns", str(max_turns)])
     if max_budget_usd is not None:
