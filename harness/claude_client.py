@@ -253,11 +253,11 @@ def _parse_stream_json(raw_stdout: str) -> dict[str, Any]:
             output_tokens = int(usage.get("output_tokens", 0))
             session_id = event.get("session_id", "")
             result_text = event.get("result", "")
+            if result_text:
+                full_text_parts.append(result_text)
             if event.get("is_error"):
                 result_subtype = "error_api_terminated"
             else:
-                if result_text:
-                    full_text_parts.append(result_text)
                 result_subtype = event.get("subtype", "")
 
     return {

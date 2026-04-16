@@ -54,6 +54,7 @@ If any check shows the code is not compiled in the default configuration, the
 finding is INTRACTABLE with reason "dead code — package <dir> not built".
 A bug in uncompiled code has no security impact.
 
+
 After you have done this work, respond with ONLY a valid JSON object.
 
 For CONFIRMED findings:

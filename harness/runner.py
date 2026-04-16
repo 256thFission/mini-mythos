@@ -240,22 +240,15 @@ def run_audit(
         _log_run(run_id, filename, file_score, model, result, tracker, harness_flags, target=target)
         return result
 
-    # Detect API-level session termination (is_error=True on result event).
-    if claude_result.result_subtype == "error_api_terminated":
-        result = RunResult(
-            status="error",
-            raw_stdout=claude_result.stdout[:50_000],
-            raw_stderr=claude_result.stderr[:10_000],
-            duration_seconds=round(duration, 1),
-            error_message="api_terminated",
-            session_id=claude_result.session_id,
-        )
-        _log_run(run_id, filename, file_score, model, result, tracker, harness_flags, target=target)
-        return result
-
     # Detect usage/rate-limit: either zero tokens (clean rejection) or the
     # API injected its limit message into the result text mid-session.
-    _RATE_LIMIT_PHRASES = ("you've hit your limit", "you have hit your limit", "rate limit")
+    # This check must run BEFORE error_api_terminated so that usage-cap
+    # responses (is_error=True but result="You're out of extra usage…") are
+    # classified as usage_limit rather than triggering a halt-and-resume loop.
+    _RATE_LIMIT_PHRASES = (
+        "you've hit your limit", "you have hit your limit", "rate limit",
+        "out of extra usage", "out of usage",
+    )
     _at_lower = agent_text.strip().lower()
     if (in_tok == 0 and out_tok == 0 and cost_usd == 0.0 and not agent_text.strip()) or \
             (len(_at_lower) < 200 and any(p in _at_lower for p in _RATE_LIMIT_PHRASES)):
@@ -265,6 +258,20 @@ def run_audit(
             raw_stderr=claude_result.stderr[:10_000],
             duration_seconds=round(duration, 1),
             error_message="usage_limit",
+        )
+        _log_run(run_id, filename, file_score, model, result, tracker, harness_flags, target=target)
+        return result
+
+    # Detect API-level session termination (is_error=True on result event,
+    # but NOT a usage-cap message — those were caught above).
+    if claude_result.result_subtype == "error_api_terminated":
+        result = RunResult(
+            status="error",
+            raw_stdout=claude_result.stdout[:50_000],
+            raw_stderr=claude_result.stderr[:10_000],
+            duration_seconds=round(duration, 1),
+            error_message="api_terminated",
+            session_id=claude_result.session_id,
         )
         _log_run(run_id, filename, file_score, model, result, tracker, harness_flags, target=target)
         return result

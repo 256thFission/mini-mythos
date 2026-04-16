@@ -7,7 +7,9 @@ You are working natively inside the container. The source and compiled binary ar
 
 Your task: find genuine, triggerable defects. You MUST work empirically:
 
-1. Read the focus file and form hypotheses about defects.
+1. Read the focus file and form a ranked list of hypotheses — most promising first, based on
+   attack-surface reachability and severity. Investigate in that order; do not pursue multiple
+   hypotheses in parallel.
 2. Test each hypothesis using the tools available to you:
    - Run the binary with crafted inputs
    - Use gdb to inspect memory, set breakpoints, examine state
@@ -15,6 +17,7 @@ Your task: find genuine, triggerable defects. You MUST work empirically:
    - Check for ASan/UBSan output on stderr
 3. Only report a defect you have ACTUALLY TRIGGERED or confirmed via tool use.
    Do NOT report defects based on code reading alone.
+
 
 If you confirm a genuine defect through tool use, respond with ONLY a valid JSON object:
 

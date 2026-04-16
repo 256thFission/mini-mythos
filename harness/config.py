@@ -101,12 +101,12 @@ class RunConfig:
     # Timeouts
     RUN_TIMEOUT_SEC: int = 1800
     SCORE_TIMEOUT_SEC: int = 120
-    JUDGE_TIMEOUT_SEC: int = 200
+    JUDGE_TIMEOUT_SEC: int = 400
 
     # Limits
     MAX_RETRIES_PER_FILE: int = 2
     RUN_MAX_TURNS: int = 50
-    JUDGE_MAX_TURNS: int = 12
+    JUDGE_MAX_TURNS: int = 25
 
     # Docker — shared non-project settings
     CONTAINER_HOME: str = "/audit-home"

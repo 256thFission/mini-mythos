@@ -85,6 +85,10 @@ def _parse_json_verdict(text: str) -> tuple[str, str, str, str]:
             retry_handoff = data.get("fix_instructions", "")
             verified_trigger = data.get("verified_trigger", "")
             if verdict in valid_verdicts:
+                if verdict == "CONFIRMED" and not verified_trigger.strip().startswith("#!"):
+                    verdict = "ERROR"
+                    reasoning = f"verified_trigger_not_bash: trigger does not start with #!"
+                    verified_trigger = ""
                 return verdict, reasoning, retry_handoff, verified_trigger
         except json.JSONDecodeError:
             pass
@@ -104,6 +108,10 @@ def _parse_json_verdict(text: str) -> tuple[str, str, str, str]:
     verified_trigger = vtr.group(1).strip() if vtr else ""
 
     if verdict in valid_verdicts:
+        if verdict == "CONFIRMED" and not verified_trigger.strip().startswith("#!"):
+            verdict = "ERROR"
+            reasoning = "verified_trigger_not_bash: trigger does not start with #!"
+            verified_trigger = ""
         return verdict, reasoning, retry_handoff, verified_trigger
 
     return "ERROR", f"json_parse_failure: no parseable verdict in {len(stripped)} chars", "", ""
