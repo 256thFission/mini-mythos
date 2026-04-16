@@ -32,12 +32,12 @@ class ClaudeResult:
 
 
 def _strip_env(env: dict[str, str] | None = None) -> dict[str, str]:
-    """Return env dict with CLAUDE_CODE* and CLAUDECODE vars removed."""
+    """Return env dict with CLAUDE_CODE* and CLAUDECODE* vars removed."""
     if env is None:
         env = dict(os.environ)
     return {
         k: v for k, v in env.items()
-        if not k.startswith("CLAUDE_CODE") and k != "CLAUDECODE"
+        if not k.startswith("CLAUDE_CODE") and not k.startswith("CLAUDECODE")
     }
 
 

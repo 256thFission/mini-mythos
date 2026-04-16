@@ -242,6 +242,7 @@ def run_audit(
             raw_stderr=claude_result.stderr[:10_000],
             duration_seconds=round(duration, 1),
             error_message=claude_result.error,
+            session_id=accumulated_session_id,
         )
         _log_run(run_id, filename, file_score, model, result, tracker, harness_flags, target=target)
         return result
@@ -255,6 +256,7 @@ def run_audit(
             raw_stderr=claude_result.stderr[:10_000],
             duration_seconds=round(duration, 1),
             error_message="max_turns_exceeded",
+            session_id=accumulated_session_id,
         )
         _log_run(run_id, filename, file_score, model, result, tracker, harness_flags, target=target)
         return result
@@ -272,6 +274,7 @@ def run_audit(
             raw_stderr=claude_result.stderr[:10_000],
             duration_seconds=round(duration, 1),
             error_message="usage_limit",
+            session_id=accumulated_session_id,
         )
         _log_run(run_id, filename, file_score, model, result, tracker, harness_flags, target=target)
         return result
@@ -420,7 +423,6 @@ def run_audit(
     _log_run(
         run_id, filename, file_score, model, result, tracker, harness_flags,
         target=target,
-        cumulative_cost=cumulative,
         transcript_path=str(transcript_path) if transcript_path else None,
         tool_call_count=len(all_tool_calls),
         retry_number=retry_number,
@@ -455,7 +457,6 @@ def _log_run(
     tracker: budget_mod.BudgetTracker,
     harness_flags: list[str],
     target: TargetConfig | None = None,
-    cumulative_cost: float | None = None,
     transcript_path: str | None = None,
     tool_call_count: int = 0,
     retry_number: int = 0,
@@ -478,7 +479,7 @@ def _log_run(
         "input_tokens": result.input_tokens,
         "output_tokens": result.output_tokens,
         "cost_usd": result.cost_usd,
-        "cumulative_cost_usd": cumulative_cost if cumulative_cost is not None else tracker.spent(),
+        "cumulative_cost_usd": tracker.spent(),
         "duration_seconds": result.duration_seconds,
         "tool_call_count": tool_call_count,
         "transcript_path": transcript_path,

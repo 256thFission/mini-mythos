@@ -183,7 +183,7 @@ def run_pipeline(
         print("  → Clone the repo first or set --source-dir to a valid path.")
         sys.exit(1)
 
-    tracker = budget_mod.BudgetTracker(hard_limit=hard_budget)
+    tracker = budget_mod.BudgetTracker(hard_limit=hard_budget, target_name=target.name)
 
     print(f"[orchestrator] Starting MiniMythos pipeline")
     print(f"  target     : {target.name} ({target.description})")

@@ -165,7 +165,6 @@ SUBMIT_JUDGE_VERDICT_TOOL = {
             },
             "verified_trigger": {
                 "type": "string",
-                "pattern": "^#!/bin/bash[\\s\\S]*$",
                 "minLength": 12,
                 "maxLength": 12000,
             },

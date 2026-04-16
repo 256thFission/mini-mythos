@@ -12,14 +12,15 @@ MIN_RUN_COST_USD = config.MIN_RUN_COST_USD
 
 
 class BudgetTracker:
-    def __init__(self, hard_limit: float = HARD_BUDGET_USD):
+    def __init__(self, hard_limit: float = HARD_BUDGET_USD, target_name: str | None = None):
         self._hard_limit = hard_limit
         self._lock = threading.Lock()
-        self._spent = self._load_from_log()
+        self._target_name = target_name
+        self._spent = self._load_from_log(target_name)
 
-    def _load_from_log(self) -> float:
+    def _load_from_log(self, target_name: str | None = None) -> float:
         """Restore cumulative spend from the audit log on startup."""
-        audit_log = config.AUDIT_LOG
+        audit_log = config.audit_log_path(target_name) if target_name else config.AUDIT_LOG
         if not audit_log.exists():
             return 0.0
         total = 0.0
