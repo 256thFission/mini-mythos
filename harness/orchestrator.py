@@ -224,6 +224,14 @@ def run_pipeline(
                 target.container_name, claude_home, container_home=config.CONTAINER_HOME
             )
 
+        # Copy the submit MCP server so agents can call submit_audit_report /
+        # submit_judge_verdict as real (MCP-registered) tools.
+        verifier_mod.copy_submit_mcp_server(
+            target.container_name,
+            container_home=config.CONTAINER_HOME,
+            dest_path=config.CONTAINER_MCP_SERVER_PATH,
+        )
+
         # ── Preflight: fast host auth check, then Docker probe ───────────────
         print("[orchestrator] Preflight: checking Claude API availability ...")
 

@@ -50,10 +50,20 @@ class JudgeResult:
     fallback: bool = False
 
 
+_SUBMIT_JUDGE_TOOL_NAMES = {
+    "submit_judge_verdict",
+    submit_mod.submit_tool_name("submit_judge_verdict"),
+}
+
+
 def _extract_submit_payload(tool_calls: list[dict]) -> dict | None:
-    """Return the input dict of the last submit_judge_verdict tool call, or None."""
+    """Return the input dict of the last submit_judge_verdict tool call, or None.
+
+    Matches both the bare name and the MCP-namespaced name
+    (``mcp__submit__submit_judge_verdict``).
+    """
     for tc in reversed(tool_calls):
-        if tc.get("name") == "submit_judge_verdict":
+        if tc.get("name") in _SUBMIT_JUDGE_TOOL_NAMES:
             payload = tc.get("input")
             if isinstance(payload, dict):
                 return payload
@@ -80,7 +90,7 @@ def _run_one_judge_session(
         container_home=config.CONTAINER_HOME,
         claude_home=claude_home,
         verbose=True,
-        tools=[submit_mod.SUBMIT_JUDGE_VERDICT_TOOL],
+        mcp_config=submit_mod.build_submit_mcp_config(config.CONTAINER_MCP_SERVER_PATH),
     )
     return (
         claude_result,

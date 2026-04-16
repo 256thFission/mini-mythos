@@ -23,7 +23,41 @@ except ImportError:
     _HAS_JSONSCHEMA = False
 
 
-# ── Tool definitions (passed to claude CLI via --tool / --tools-json) ─────────
+# ── MCP server wiring ─────────────────────────────────────────────────────────
+#
+# The submit tools are exposed to the agent via an MCP stdio server
+# (``submit_mcp_server.py``) that lives inside the target container. Claude's
+# ``--tools`` flag only whitelists *built-in* tools; custom tools must be
+# registered through MCP. When the agent invokes these tools, Claude Code
+# namespaces them as ``mcp__<serverName>__<toolName>`` in the stream-json
+# transcript — see ``submit_tool_name()`` below.
+
+SUBMIT_MCP_SERVER_NAME = "submit"
+SUBMIT_MCP_SCRIPT_BASENAME = "submit_mcp_server.py"
+
+
+def submit_tool_name(base_name: str) -> str:
+    """Return the MCP-namespaced tool name as it appears in stream-json."""
+    return f"mcp__{SUBMIT_MCP_SERVER_NAME}__{base_name}"
+
+
+def build_submit_mcp_config(script_path: str) -> dict:
+    """Build the --mcp-config payload that spawns the submit server.
+
+    ``script_path`` must be the absolute path to ``submit_mcp_server.py`` *as
+    seen from inside the container* (since Claude will spawn python3 there).
+    """
+    return {
+        "mcpServers": {
+            SUBMIT_MCP_SERVER_NAME: {
+                "command": "python3",
+                "args": [script_path],
+            }
+        }
+    }
+
+
+# ── Tool definitions (used for validation + retry feedback; NOT sent to CLI) ──
 
 SUBMIT_AUDIT_REPORT_TOOL = {
     "name": "submit_audit_report",
