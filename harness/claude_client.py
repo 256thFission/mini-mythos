@@ -48,8 +48,10 @@ def _build_claude_args(
     max_turns: int | None = None,
     max_budget_usd: float | None = None,
     resume_session_id: str | None = None,
+    tools: list[dict] | None = None,
 ) -> list[str]:
     """Build the base claude CLI arguments."""
+    import json as _json
     cmd = ["claude"]
     if resume_session_id:
         cmd.extend(["--resume", resume_session_id])
@@ -64,6 +66,8 @@ def _build_claude_args(
         cmd.extend(["--max-turns", str(max_turns)])
     if max_budget_usd is not None:
         cmd.extend(["--max-budget-usd", str(max_budget_usd)])
+    if tools:
+        cmd.extend(["--tools", _json.dumps(tools)])
     return cmd
 
 
@@ -81,6 +85,7 @@ def invoke_claude(
     claude_home: str | None = None,
     verbose: bool = False,
     resume_session_id: str | None = None,
+    tools: list[dict] | None = None,
 ) -> ClaudeResult:
     """Invoke the claude CLI and return a structured result.
 
@@ -108,6 +113,7 @@ def invoke_claude(
         max_turns=max_turns,
         max_budget_usd=max_budget_usd,
         resume_session_id=resume_session_id,
+        tools=tools,
     )
     if verbose:
         base_cmd.append("--verbose")

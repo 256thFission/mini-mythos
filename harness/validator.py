@@ -1,23 +1,23 @@
 """Gate B — independent judge agent.
 
-The judge receives only the defect_report and diagnostic_trigger from the audit agent.
+The judge receives the audit findings from the audit agent.
 It has NO access to the original agent's transcript or reasoning — it investigates
-independently using tools, then returns one of:
+independently using tools, then finalises via submit_judge_verdict, returning one of:
 
   CONFIRMED   — independently verified the finding
+  RETRY       — finding has flaws but the vulnerability might exist
   INTRACTABLE — dead end; no realistic exploit path from this file
-  ERROR       — judge execution failed or returned unparseable output
 """
 
 import json
-import re
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import budget as budget_mod
 from claude_client import invoke_claude
 from config import config, TargetConfig
+import submit_tools as submit_mod
 
 
 JUDGE_PROMPT_PATH = config.PROMPTS_DIR / "judge.txt"
@@ -27,25 +27,11 @@ JUDGE_MAX_TURNS = config.JUDGE_MAX_TURNS
 JUDGE_MAX_BUDGET_USD = config.JUDGE_MAX_BUDGET_USD
 JUDGE_TRANSCRIPTS_DIR = config.RUNS_DIR / "judge_transcripts"
 
-FORMAT_CORRECTION_PROMPT = """\
-You previously acted as a security judge and produced an output, but the output could not be parsed as valid JSON.
-
-Your output was:
----
-{raw_output}
----
-
-Extract the verdict fields from your output and return ONLY a valid JSON object — no markdown fences, no commentary, no XML tags. Nothing before or after the JSON.
-
-Required format for CONFIRMED:
-{{"verdict": "CONFIRMED", "reasoning": "...", "verified_trigger": "..."}}
-
-Required format for RETRY:
-{{"verdict": "RETRY", "reasoning": "...", "fix_instructions": "..."}}
-
-Required format for INTRACTABLE:
-{{"verdict": "INTRACTABLE", "reasoning": "..."}}
-"""
+FORCED_FINALIZATION_PROMPT = (
+    "Finalization turn. Stop investigation now. "
+    "Do not run additional exploratory actions. "
+    "Call submit_judge_verdict immediately with your best final payload."
+)
 
 
 
@@ -53,112 +39,74 @@ Required format for INTRACTABLE:
 class JudgeResult:
     verdict: str              # "CONFIRMED", "RETRY", "INTRACTABLE", "ERROR"
     reasoning: str
-    retry_handoff: str        # populated when verdict == "RETRY"
+    retry_handoff: str        # populated when verdict == "RETRY" (fix_instructions)
     verified_trigger: str     # populated when verdict == "CONFIRMED"; Gate A runs this
     cost_usd: float
     duration_seconds: float
     transcript_path: str
+    checks: list = field(default_factory=list)
+    confidence: float = 0.0
+    submit_attempts: int = 0
+    fallback: bool = False
 
 
-def _parse_json_verdict(text: str) -> tuple[str, str, str, str]:
-    """Parse judge output. Tries strict JSON first, falls back to XML tag extraction.
-
-    Returns (verdict, reasoning, retry_handoff/fix_instructions, verified_trigger).
-    Falls back to ("ERROR", reason, "", "") if nothing parseable.
-    """
-    valid_verdicts = ("CONFIRMED", "RETRY", "INTRACTABLE", "ERROR")
-    stripped = text.strip()
-
-    # ── Pre-process: strip markdown fences if present ────────────────────────
-    stripped = re.sub(r'^```(?:json)?\s*', '', stripped, flags=re.MULTILINE)
-    stripped = re.sub(r'\s*```\s*$', '', stripped, flags=re.MULTILINE)
-    stripped = stripped.strip()
-
-    # ── Attempt 1: strict JSON (preferred) ──────────────────────────────────
-    # Scan last-to-first so we pick the final copy when the agent duplicates output.
-    for m in reversed(list(re.finditer(r'\{', stripped))):
-        candidate = stripped[m.start():]
-        try:
-            data = json.loads(candidate)
-            verdict = data.get("verdict", "").upper()
-            reasoning = data.get("reasoning", "")
-            retry_handoff = data.get("fix_instructions", "")
-            verified_trigger = data.get("verified_trigger", "")
-            if verdict in valid_verdicts:
-                if verdict == "CONFIRMED":
-                    if not verified_trigger.strip():
-                        verdict = "ERROR"
-                        reasoning = "verified_trigger_empty: CONFIRMED verdict requires a non-empty trigger script"
-                        verified_trigger = ""
-                    elif not verified_trigger.strip().startswith("#!"):
-                        verdict = "ERROR"
-                        reasoning = "verified_trigger_not_bash: trigger does not start with #!"
-                        verified_trigger = ""
-                return verdict, reasoning, retry_handoff, verified_trigger
-        except json.JSONDecodeError:
-            pass
-
-    # ── Attempt 2: XML tag extraction (actual agent format) ──────────────────
-    vt = re.search(r"<verdict>(.*?)</verdict>", stripped, re.DOTALL)
-    rs = re.search(r"<reasoning>(.*?)</reasoning>", stripped, re.DOTALL)
-    rh = re.search(r"<retry_handoff>(.*?)</retry_handoff>", stripped, re.DOTALL)
-    # judge.txt uses fix_instructions as key but agent may use retry_handoff tag
-    fi = re.search(r"<fix_instructions>(.*?)</fix_instructions>", stripped, re.DOTALL)
-    vtr = re.search(r"<verified_trigger>(.*?)</verified_trigger>", stripped, re.DOTALL)
-
-    verdict = vt.group(1).strip().upper() if vt else ""
-    reasoning = rs.group(1).strip() if rs else ""
-    retry_handoff = (rh or fi)
-    retry_handoff = retry_handoff.group(1).strip() if retry_handoff else ""
-    verified_trigger = vtr.group(1).strip() if vtr else ""
-
-    if verdict in valid_verdicts:
-        if verdict == "CONFIRMED":
-            if not verified_trigger.strip():
-                verdict = "ERROR"
-                reasoning = "verified_trigger_empty: CONFIRMED verdict requires a non-empty trigger script"
-                verified_trigger = ""
-            elif not verified_trigger.strip().startswith("#!"):
-                verdict = "ERROR"
-                reasoning = "verified_trigger_not_bash: trigger does not start with #!"
-                verified_trigger = ""
-        return verdict, reasoning, retry_handoff, verified_trigger
-
-    return "ERROR", f"json_parse_failure: no parseable verdict in {len(stripped)} chars", "", ""
+def _extract_submit_payload(tool_calls: list[dict]) -> dict | None:
+    """Return the input dict of the last submit_judge_verdict tool call, or None."""
+    for tc in reversed(tool_calls):
+        if tc.get("name") == "submit_judge_verdict":
+            payload = tc.get("input")
+            if isinstance(payload, dict):
+                return payload
+    return None
 
 
-def _format_correction(
-    raw_output: str,
+def _run_one_judge_session(
+    prompt: str,
     model: str,
-    tracker: budget_mod.BudgetTracker,
-    claude_home: str | None = None,
-) -> tuple[str, str, str, str] | None:
-    """Single cheap non-agentic call to reformat unparseable judge output.
-
-    Returns (verdict, reasoning, retry_handoff, verified_trigger) on success,
-    or None if the correction call also fails to parse.
-    """
-    prompt = FORMAT_CORRECTION_PROMPT.format(raw_output=raw_output[:8000])
-    result = invoke_claude(
+    target: TargetConfig,
+    claude_home: str | None,
+) -> tuple[object, float, int, int, list, list]:
+    """Invoke claude once and return (claude_result, cost, in_tok, out_tok, events, tool_calls)."""
+    claude_result = invoke_claude(
         prompt=prompt,
         model=model,
-        timeout=60,
-        output_format="json",
-        max_turns=1,
-        use_docker=False,
+        timeout=JUDGE_TIMEOUT_SEC,
+        output_format="stream-json",
+        max_turns=JUDGE_MAX_TURNS,
+        max_budget_usd=JUDGE_MAX_BUDGET_USD,
+        use_docker=True,
+        container_name=target.container_name,
+        container_workdir=target.container_workdir,
+        container_home=config.CONTAINER_HOME,
         claude_home=claude_home,
-        verbose=False,
+        verbose=True,
+        tools=[submit_mod.SUBMIT_JUDGE_VERDICT_TOOL],
     )
-    if result.error or not result.full_text.strip():
-        return None
-    try:
-        tracker.record(result.cost_usd)
-    except budget_mod.BudgetExceededError:
-        pass
-    verdict, reasoning, retry_handoff, verified_trigger = _parse_json_verdict(result.full_text)
-    if verdict == "ERROR":
-        return None
-    return verdict, reasoning, retry_handoff, verified_trigger
+    return (
+        claude_result,
+        claude_result.cost_usd,
+        claude_result.input_tokens,
+        claude_result.output_tokens,
+        claude_result.events or [],
+        claude_result.tool_calls or [],
+    )
+
+
+def _log_event(
+    event: str,
+    run_id: str,
+    target_file: str,
+    phase: str = "judge",
+    attempt: int | None = None,
+    errors: list | None = None,
+) -> None:
+    """Emit a structured observability event to stdout."""
+    parts = [f"[{event}] phase={phase} run={run_id[:8]} file={target_file}"]
+    if attempt is not None:
+        parts.append(f"attempt={attempt}")
+    if errors:
+        parts.append(f"errors={len(errors)}")
+    print(" ".join(parts))
 
 
 def judge(
@@ -177,7 +125,7 @@ def judge(
     Run the independent judge agent against a candidate finding.
 
     The judge sees only the claim and trigger — not the original agent's work.
-    It uses tools to investigate, then returns CONFIRMED / RETRY / INTRACTABLE / ERROR.
+    It uses tools to investigate, then finalises via submit_judge_verdict.
     """
     template = JUDGE_PROMPT_PATH.read_text()
     prompt = (
@@ -189,26 +137,30 @@ def judge(
     )
 
     start = time.time()
+    total_cost = 0.0
+    total_in_tok = 0
+    total_out_tok = 0
+    all_events: list = []
+    all_tool_calls: list = []
+    submit_attempt = 0
+    max_submit_retries = config.SUBMIT_MAX_RETRIES
 
-    # Use centralized claude_client
-    claude_result = invoke_claude(
+    # ── Main session ─────────────────────────────────────────────────────────
+    claude_result, cost, in_tok, out_tok, events, tool_calls = _run_one_judge_session(
         prompt=prompt,
         model=model,
-        timeout=JUDGE_TIMEOUT_SEC,
-        output_format="stream-json",
-        max_turns=JUDGE_MAX_TURNS,
-        max_budget_usd=JUDGE_MAX_BUDGET_USD,
-        use_docker=True,
-        container_name=target.container_name,
-        container_workdir=target.container_workdir,
-        container_home=config.CONTAINER_HOME,
+        target=target,
         claude_home=claude_home,
-        verbose=True,
     )
+    total_cost += cost
+    total_in_tok += in_tok
+    total_out_tok += out_tok
+    all_events.extend(events)
+    all_tool_calls.extend(tool_calls)
 
     duration = time.time() - start
 
-    # Handle errors (timeout, exception)
+    # ── Hard-error checks ────────────────────────────────────────────────
     if claude_result.error:
         result = JudgeResult(
             verdict="ERROR",
@@ -222,18 +174,10 @@ def judge(
         _log_judge(run_id, result, focus_file, target=target)
         return result
 
-    # Extract parsed fields
-    events = claude_result.events or []
     full_text = claude_result.full_text
-    cost_usd = claude_result.cost_usd
-    in_tok = claude_result.input_tokens
-    out_tok = claude_result.output_tokens
-
-    # Detect usage/rate-limit: either zero tokens (clean rejection) or the
-    # API injected its limit message into the result text mid-session.
     _RATE_LIMIT_PHRASES = ("you've hit your limit", "you have hit your limit", "rate limit")
     _ft_lower = full_text.strip().lower()
-    if (in_tok == 0 and out_tok == 0 and cost_usd == 0.0 and not full_text.strip()) or \
+    if (in_tok == 0 and out_tok == 0 and cost == 0.0 and not full_text.strip()) or \
             (len(_ft_lower) < 200 and any(p in _ft_lower for p in _RATE_LIMIT_PHRASES)):
         result = JudgeResult(
             verdict="ERROR",
@@ -247,43 +191,130 @@ def judge(
         _log_judge(run_id, result, focus_file, target=target)
         return result
 
-    # Parse JSON verdict — with a cheap format-correction fallback
-    verdict, reasoning, retry_handoff, verified_trigger = _parse_json_verdict(full_text)
-    if verdict == "ERROR" and full_text.strip():
-        corrected = _format_correction(
-            raw_output=full_text,
+    # ── Submit tool extraction + validation loop ───────────────────────────────
+    last_validation_errors: list[dict] = []
+    valid_payload: dict | None = None
+
+    payload = _extract_submit_payload(all_tool_calls)
+    if payload is not None:
+        submit_attempt += 1
+        _log_event("submit_attempt", run_id, focus_file, phase="judge", attempt=submit_attempt)
+        vr = submit_mod.validate_judge_verdict(payload)
+        if vr.ok:
+            _log_event("submit_validation_passed", run_id, focus_file, phase="judge", attempt=submit_attempt)
+            valid_payload = payload
+        else:
+            last_validation_errors = [vars(e) for e in vr.errors]
+            _log_event(
+                "submit_validation_failed", run_id, focus_file, phase="judge",
+                attempt=submit_attempt, errors=last_validation_errors,
+            )
+            while submit_attempt <= max_submit_retries and valid_payload is None:
+                attempts_remaining = max_submit_retries - submit_attempt
+                feedback = vr.to_feedback(submit_attempt, attempts_remaining)
+                feedback_prompt = (
+                    "Your submit_judge_verdict call failed validation. "
+                    "Fix the errors below and call submit_judge_verdict again.\n\n"
+                    + json.dumps(feedback, indent=2)
+                )
+                cr2, c2, it2, ot2, ev2, tc2 = _run_one_judge_session(
+                    prompt=feedback_prompt,
+                    model=model,
+                    target=target,
+                    claude_home=claude_home,
+                )
+                total_cost += c2
+                total_in_tok += it2
+                total_out_tok += ot2
+                all_events.extend(ev2)
+                all_tool_calls.extend(tc2)
+                payload2 = _extract_submit_payload(tc2)
+                if payload2 is None:
+                    break
+                submit_attempt += 1
+                _log_event("submit_attempt", run_id, focus_file, phase="judge", attempt=submit_attempt)
+                vr = submit_mod.validate_judge_verdict(payload2)
+                if vr.ok:
+                    _log_event("submit_validation_passed", run_id, focus_file, phase="judge", attempt=submit_attempt)
+                    valid_payload = payload2
+                else:
+                    last_validation_errors = [vars(e) for e in vr.errors]
+                    _log_event(
+                        "submit_validation_failed", run_id, focus_file, phase="judge",
+                        attempt=submit_attempt, errors=last_validation_errors,
+                    )
+
+    # ── Forced finalization turn ───────────────────────────────────────────
+    if valid_payload is None:
+        _log_event("forced_finalization_turn", run_id, focus_file, phase="judge")
+        cr_final, cf, itf, otf, evf, tcf = _run_one_judge_session(
+            prompt=FORCED_FINALIZATION_PROMPT,
             model=model,
-            tracker=tracker,
+            target=target,
             claude_home=claude_home,
         )
-        if corrected is not None:
-            verdict, reasoning, retry_handoff, verified_trigger = corrected
+        total_cost += cf
+        total_in_tok += itf
+        total_out_tok += otf
+        all_events.extend(evf)
+        all_tool_calls.extend(tcf)
+        payload_final = _extract_submit_payload(tcf)
+        if payload_final is not None:
+            submit_attempt += 1
+            _log_event("submit_attempt", run_id, focus_file, phase="judge", attempt=submit_attempt)
+            vr_final = submit_mod.validate_judge_verdict(payload_final)
+            if vr_final.ok:
+                _log_event("submit_validation_passed", run_id, focus_file, phase="judge", attempt=submit_attempt)
+                valid_payload = payload_final
+            else:
+                last_validation_errors = [vars(e) for e in vr_final.errors]
+                _log_event(
+                    "submit_validation_failed", run_id, focus_file, phase="judge",
+                    attempt=submit_attempt, errors=last_validation_errors,
+                )
 
-    # Save transcript — isolated from audit agent transcripts
+    # ── Fallback ─────────────────────────────────────────────────────────────
+    if valid_payload is None:
+        _log_event("fallback_emitted", run_id, focus_file, phase="judge")
+        valid_payload = submit_mod.judge_fallback()
+        fallback = True
+    else:
+        fallback = False
+
+    # ── Map payload to JudgeResult ──────────────────────────────────────────
+    verdict = valid_payload.get("verdict", "RETRY")
+    if verdict not in ("CONFIRMED", "RETRY", "INTRACTABLE"):
+        verdict = "RETRY"
+
+    # Save transcript
     JUDGE_TRANSCRIPTS_DIR.mkdir(parents=True, exist_ok=True)
     transcript_path = JUDGE_TRANSCRIPTS_DIR / f"judge__{focus_file}__{verdict.lower()}__{run_id[:8]}.jsonl"
     with open(transcript_path, "w") as f:
         f.write(json.dumps({
             "type": "header", "run_id": run_id, "role": "judge", "focus_file": focus_file,
         }) + "\n")
-        for event in events:
+        for event in all_events:
             f.write(json.dumps(event) + "\n")
 
     try:
-        tracker.record(cost_usd)
+        tracker.record(total_cost)
     except budget_mod.BudgetExceededError:
         pass
 
     result = JudgeResult(
         verdict=verdict,
-        reasoning=reasoning,
-        retry_handoff=retry_handoff,
-        verified_trigger=verified_trigger,
-        cost_usd=cost_usd,
+        reasoning=valid_payload.get("reasoning", ""),
+        retry_handoff=valid_payload.get("fix_instructions", ""),
+        verified_trigger=valid_payload.get("verified_trigger", ""),
+        cost_usd=total_cost,
         duration_seconds=round(duration, 1),
         transcript_path=str(transcript_path),
+        checks=valid_payload.get("checks", []),
+        confidence=valid_payload.get("confidence", 0.0),
+        submit_attempts=submit_attempt,
+        fallback=fallback,
     )
-    _log_judge(run_id, result, focus_file, target=target, in_tok=in_tok, out_tok=out_tok)
+    _log_judge(run_id, result, focus_file, target=target, in_tok=total_in_tok, out_tok=total_out_tok)
     return result
 
 
@@ -304,6 +335,7 @@ def _log_judge(
         "event": "gate_b",
         "judge_verdict": result.verdict,
         "judge_reasoning": result.reasoning[:2000] if result.reasoning else None,
+        "judge_confidence": result.confidence,
         "retry_handoff": result.retry_handoff[:2000] if result.retry_handoff else None,
         "focus_file": focus_file,
         "cost_usd": result.cost_usd,
@@ -311,6 +343,8 @@ def _log_judge(
         "output_tokens": out_tok,
         "duration_seconds": result.duration_seconds,
         "judge_transcript_path": result.transcript_path,
+        "submit_attempts": result.submit_attempts,
+        "fallback": result.fallback,
     }
 
     audit_log = config.audit_log_path(target.name) if target else config.AUDIT_LOG

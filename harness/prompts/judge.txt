@@ -55,29 +55,28 @@ finding is INTRACTABLE with reason "dead code — package <dir> not built".
 A bug in uncompiled code has no security impact.
 
 
-After you have done this work, respond with ONLY a valid JSON object.
+After you have done this work, call the submit_judge_verdict tool to finalize your verdict.
 
-For CONFIRMED findings:
-{
-  "verdict": "CONFIRMED",
-  "reasoning": "How you independently verified the finding. Cite specific tool output, caller analysis, and the realistic attack path. Do not summarize the claim — describe what YOU found.",
-  "verified_trigger": "EXECUTABLE BASH ONLY. This field is passed directly to bash -c. It MUST start with #!/bin/bash and contain only shell commands you have actually run and observed produce sanitizer output. Do NOT put prose, descriptions, or instructions here — bash cannot execute English sentences and a syntax error will cause Gate A to fail silently. Paste the exact script, nothing else."
-}
+The checks field must include at least one entry. Use the check names that match what you
+actually verified:
+  - source_guard_check      (SL-3a: #ifdef / preprocessor gate)
+  - object_symbol_check     (SL-3b: nm -g on the .o file)
+  - cross_package_build_check (SL-3c: caller .o file existence)
+  - call_path_reachability_check (SL-1: real callers vs. synthetic trigger)
+  - trigger_realism_check   (SL-2: sanitizer-only UB with no real consequence)
 
-For RETRY (the finding has flaws but the vulnerability might exist):
-{
-  "verdict": "RETRY",
-  "reasoning": "What is wrong with the current finding. If a slop loophole applies, name it (e.g. SL-1). Be specific: which caller, which line, why the trigger is synthetic or the attack path is blocked.",
-  "fix_instructions": "Concrete, actionable guidance for a new analysis attempt on this file. Tell the analyst: - What the real reachable attack surface looks like - Which code paths to follow from actual network input - What a valid trigger would need to look like to reflect a real caller - Any promising adjacent code sites worth investigating instead"
-}
+For CONFIRMED: set verdict="CONFIRMED" and provide verified_trigger — a bash script starting
+with #!/bin/bash that you have already run and observed produce sanitizer output.
+Do NOT put prose in verified_trigger — bash cannot execute English sentences.
 
-For INTRACTABLE (dead end, no exploit path exists):
-{
-  "verdict": "INTRACTABLE",
-  "reasoning": "Why this file or code path cannot produce a real exploitable finding. If a slop loophole applies, name it. Cite specific evidence: all callers use compile-time constants, the function is unreachable from network input, the buffer is stack-allocated with fixed size."
-}
+For RETRY: set verdict="RETRY" and provide fix_instructions with concrete, actionable
+guidance for a new analysis attempt.
 
-Respond ONLY with the JSON object. No markdown fences, no conversational filler, no XML tags.
+For INTRACTABLE: set verdict="INTRACTABLE" and explain in reasoning why no exploit path
+exists, citing specific evidence.
+
+On the finalization turn (if you receive that instruction), call submit_judge_verdict
+immediately with your best current payload — no further exploration.
 
 ---
 

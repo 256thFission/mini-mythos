@@ -5,7 +5,6 @@ Uses --output-format stream-json to get per-event records.
 """
 
 import json
-import re
 import subprocess
 import time
 from dataclasses import dataclass, field
@@ -15,6 +14,7 @@ import budget as budget_mod
 from claude_client import invoke_claude
 from config import config, TargetConfig
 import preprocessor as preprocessor_mod
+import submit_tools as submit_mod
 
 
 AUDIT_PROMPT_PATH = config.PROMPTS_DIR / "audit.txt"
@@ -30,9 +30,11 @@ TRANSCRIPTS_DIR = config.RUNS_DIR / "transcripts"
 @dataclass
 class RunResult:
     status: str
-    defect_report: str = ""
+    summary: str = ""
+    confidence: float = 0.0
+    findings: list = field(default_factory=list)
+    negative_findings: list = field(default_factory=list)
     diagnostic_trigger: str = ""
-    no_finding_reason: str = ""
     raw_stdout: str = ""
     raw_stderr: str = ""
     input_tokens: int = 0
@@ -43,11 +45,13 @@ class RunResult:
     error_message: str = ""
     transcript_events: list = field(default_factory=list)
     session_id: str = ""
+    submit_attempts: int = 0
+    fallback: bool = False
 
 
 RESUME_CONTINUATION_PROMPT = (
     "The previous session was interrupted by an API error. "
-    "Please continue your security analysis and provide your final JSON verdict when complete."
+    "Please continue your security analysis and call submit_audit_report with your best findings when complete."
 )
 
 
@@ -63,6 +67,12 @@ Use the judge's guidance as your starting point. If you believe the judge is wro
 prove it empirically with tool output.
 ---
 """
+
+FORCED_FINALIZATION_PROMPT = (
+    "Finalization turn. Stop investigation now. "
+    "Do not run additional exploratory actions. "
+    "Call submit_audit_report immediately with your best final payload."
+)
 
 
 def _load_prompt(
@@ -84,46 +94,6 @@ def _load_prompt(
         prompt = prompt + RETRY_HANDOFF_HEADER.replace("{retry_handoff}", retry_handoff)
     return prompt
 
-
-def _parse_json_output(text: str) -> tuple[str, str, str, str]:
-    """Parse auditor output. Tries strict JSON first, falls back to XML tag extraction.
-
-    Returns (status, defect_report, diagnostic_trigger, no_finding_reason).
-    Falls back to ("declined", "", "", reason) if nothing can be parsed.
-    """
-    stripped = text.strip()
-
-    # ── Attempt 1: strict JSON (preferred) ──────────────────────────────────
-    # Find all top-level '{' positions and try each as a JSON start, last-first,
-    # so we pick the final/authoritative copy when the agent duplicates output.
-    for m in reversed(list(re.finditer(r'\{', stripped))):
-        candidate = stripped[m.start():]
-        try:
-            data = json.loads(candidate)
-            status = data.get("status", "")
-            defect_report = data.get("defect_report", "")
-            diagnostic_trigger = data.get("diagnostic_trigger", "")
-            no_finding_reason = data.get("no_finding_reason", "")
-            if status in ("candidate", "no_finding"):
-                return status, defect_report, diagnostic_trigger, no_finding_reason
-        except json.JSONDecodeError:
-            pass
-
-    # ── Attempt 2: XML tag extraction (legacy agent format) ──────────────────
-    dr = re.search(r"<defect_report>(.*?)</defect_report>", stripped, re.DOTALL)
-    dt = re.search(r"<diagnostic_trigger>(.*?)</diagnostic_trigger>", stripped, re.DOTALL)
-    nf = re.search(r"<no_finding>(.*?)</no_finding>", stripped, re.DOTALL)
-
-    defect_report = dr.group(1).strip() if dr else ""
-    diagnostic_trigger = dt.group(1).strip() if dt else ""
-    no_finding_reason = nf.group(1).strip() if nf else ""
-
-    if defect_report and diagnostic_trigger:
-        return "candidate", defect_report, diagnostic_trigger, ""
-    if no_finding_reason:
-        return "no_finding", "", "", no_finding_reason
-
-    return "declined", "", "", f"json_parse_failure: no parseable output in {len(stripped)} chars"
 
 
 
@@ -150,6 +120,52 @@ def _save_transcript(run_id: str, filename: str, status: str, events: list, tool
         }) + "\n")
 
     return transcript_path
+
+
+def _extract_submit_payload(tool_calls: list[dict]) -> dict | None:
+    """Return the input dict of the last submit_audit_report tool call, or None."""
+    for tc in reversed(tool_calls):
+        if tc.get("name") == "submit_audit_report":
+            payload = tc.get("input")
+            if isinstance(payload, dict):
+                return payload
+    return None
+
+
+def _run_one_audit_session(
+    prompt: str,
+    model: str,
+    timeout: int,
+    target: TargetConfig,
+    claude_home: str | None,
+    resume_session_id: str | None = None,
+) -> tuple[object, float, int, int, list, list, str]:
+    """Invoke claude once and return (claude_result, cost, in_tok, out_tok, events, tool_calls, session_id)."""
+    claude_result = invoke_claude(
+        prompt=prompt,
+        model=model,
+        timeout=timeout,
+        output_format="stream-json",
+        max_turns=RUN_MAX_TURNS,
+        max_budget_usd=PER_RUN_BUDGET_USD,
+        use_docker=True,
+        container_name=target.container_name,
+        container_workdir=target.container_workdir,
+        container_home=config.CONTAINER_HOME,
+        claude_home=claude_home,
+        verbose=True,
+        resume_session_id=resume_session_id,
+        tools=[submit_mod.SUBMIT_AUDIT_REPORT_TOOL],
+    )
+    return (
+        claude_result,
+        claude_result.cost_usd,
+        claude_result.input_tokens,
+        claude_result.output_tokens,
+        claude_result.events or [],
+        claude_result.tool_calls or [],
+        claude_result.session_id,
+    )
 
 
 def run_audit(
@@ -190,27 +206,35 @@ def run_audit(
     )
 
     start = time.time()
+    total_cost = 0.0
+    total_in_tok = 0
+    total_out_tok = 0
+    all_events: list = []
+    all_tool_calls: list = []
+    accumulated_session_id = ""
+    submit_attempt = 0
+    max_submit_retries = config.SUBMIT_MAX_RETRIES
 
-    # Use centralized claude_client
-    claude_result = invoke_claude(
-        prompt=RESUME_CONTINUATION_PROMPT if resume_session_id else prompt,
+    # ── Main session (turns 1..max_turns) ────────────────────────────────────
+    first_prompt = RESUME_CONTINUATION_PROMPT if resume_session_id else prompt
+    claude_result, cost, in_tok, out_tok, events, tool_calls, sid = _run_one_audit_session(
+        prompt=first_prompt,
         model=model,
         timeout=RUN_TIMEOUT_SEC,
-        output_format="stream-json",
-        max_turns=RUN_MAX_TURNS,
-        max_budget_usd=PER_RUN_BUDGET_USD,
-        use_docker=True,
-        container_name=target.container_name,
-        container_workdir=target.container_workdir,
-        container_home=config.CONTAINER_HOME,
+        target=target,
         claude_home=claude_home,
-        verbose=True,
         resume_session_id=resume_session_id,
     )
+    total_cost += cost
+    total_in_tok += in_tok
+    total_out_tok += out_tok
+    all_events.extend(events)
+    all_tool_calls.extend(tool_calls)
+    accumulated_session_id = sid or accumulated_session_id
 
     duration = time.time() - start
 
-    # Handle errors (timeout, exception)
+    # ── Hard-error checks (timeout, API failure, usage limit) ─────────────────
     if claude_result.error:
         result = RunResult(
             status="error",
@@ -222,13 +246,8 @@ def run_audit(
         _log_run(run_id, filename, file_score, model, result, tracker, harness_flags, target=target)
         return result
 
-    # Extract parsed fields
     agent_text = claude_result.full_text
-    cost_usd = claude_result.cost_usd
-    in_tok = claude_result.input_tokens
-    out_tok = claude_result.output_tokens
 
-    # Detect turn-limit exhaustion: agent used all turns without producing output.
     if claude_result.result_subtype == "error_max_turns":
         result = RunResult(
             status="error",
@@ -240,17 +259,12 @@ def run_audit(
         _log_run(run_id, filename, file_score, model, result, tracker, harness_flags, target=target)
         return result
 
-    # Detect usage/rate-limit: either zero tokens (clean rejection) or the
-    # API injected its limit message into the result text mid-session.
-    # This check must run BEFORE error_api_terminated so that usage-cap
-    # responses (is_error=True but result="You're out of extra usage…") are
-    # classified as usage_limit rather than triggering a halt-and-resume loop.
     _RATE_LIMIT_PHRASES = (
         "you've hit your limit", "you have hit your limit", "rate limit",
         "out of extra usage", "out of usage",
     )
     _at_lower = agent_text.strip().lower()
-    if (in_tok == 0 and out_tok == 0 and cost_usd == 0.0 and not agent_text.strip()) or \
+    if (in_tok == 0 and out_tok == 0 and cost == 0.0 and not agent_text.strip()) or \
             (len(_at_lower) < 200 and any(p in _at_lower for p in _RATE_LIMIT_PHRASES)):
         result = RunResult(
             status="error",
@@ -262,8 +276,6 @@ def run_audit(
         _log_run(run_id, filename, file_score, model, result, tracker, harness_flags, target=target)
         return result
 
-    # Detect API-level session termination (is_error=True on result event,
-    # but NOT a usage-cap message — those were caught above).
     if claude_result.result_subtype == "error_api_terminated":
         result = RunResult(
             status="error",
@@ -271,47 +283,138 @@ def run_audit(
             raw_stderr=claude_result.stderr[:10_000],
             duration_seconds=round(duration, 1),
             error_message="api_terminated",
-            session_id=claude_result.session_id,
+            session_id=accumulated_session_id,
         )
         _log_run(run_id, filename, file_score, model, result, tracker, harness_flags, target=target)
         return result
 
-    tool_calls = claude_result.tool_calls or []
-    events = claude_result.events or []
+    # ── Submit tool extraction + validation loop ───────────────────────────────
+    last_validation_errors: list[dict] = []
+    valid_payload: dict | None = None
 
-    # Parse JSON output from agent
-    status, defect_report, diagnostic_trigger, no_finding_reason = _parse_json_output(agent_text)
+    payload = _extract_submit_payload(all_tool_calls)
+    if payload is not None:
+        submit_attempt += 1
+        _log_event("submit_attempt", run_id, filename, phase="audit", attempt=submit_attempt)
+        vr = submit_mod.validate_audit_report(payload)
+        if vr.ok:
+            _log_event("submit_validation_passed", run_id, filename, phase="audit", attempt=submit_attempt)
+            valid_payload = payload
+        else:
+            last_validation_errors = [vars(e) for e in vr.errors]
+            _log_event(
+                "submit_validation_failed", run_id, filename, phase="audit",
+                attempt=submit_attempt, errors=last_validation_errors,
+            )
+            # Retry loop: return validation feedback to the agent
+            while submit_attempt <= max_submit_retries and valid_payload is None:
+                attempts_remaining = max_submit_retries - submit_attempt
+                feedback = vr.to_feedback(submit_attempt, attempts_remaining)
+                feedback_prompt = (
+                    "Your submit_audit_report call failed validation. "
+                    "Fix the errors below and call submit_audit_report again.\n\n"
+                    + json.dumps(feedback, indent=2)
+                )
+                cr2, c2, it2, ot2, ev2, tc2, sid2 = _run_one_audit_session(
+                    prompt=feedback_prompt,
+                    model=model,
+                    timeout=RUN_TIMEOUT_SEC,
+                    target=target,
+                    claude_home=claude_home,
+                )
+                total_cost += c2
+                total_in_tok += it2
+                total_out_tok += ot2
+                all_events.extend(ev2)
+                all_tool_calls.extend(tc2)
+                accumulated_session_id = sid2 or accumulated_session_id
+                payload2 = _extract_submit_payload(tc2)
+                if payload2 is None:
+                    break
+                submit_attempt += 1
+                _log_event("submit_attempt", run_id, filename, phase="audit", attempt=submit_attempt)
+                vr = submit_mod.validate_audit_report(payload2)
+                if vr.ok:
+                    _log_event("submit_validation_passed", run_id, filename, phase="audit", attempt=submit_attempt)
+                    valid_payload = payload2
+                else:
+                    last_validation_errors = [vars(e) for e in vr.errors]
+                    _log_event(
+                        "submit_validation_failed", run_id, filename, phase="audit",
+                        attempt=submit_attempt, errors=last_validation_errors,
+                    )
 
-    # Re-classify if needed based on content
-    if status == "declined" and (defect_report or no_finding_reason):
-        # JSON parse failed but we have content
-        pass
-    elif status == "candidate" and not (defect_report and diagnostic_trigger):
-        # Incomplete candidate
-        status = "declined"
-        no_finding_reason = "incomplete_output: missing defect_report or diagnostic_trigger"
+    # ── Forced finalization turn (max_turns + 1) if no valid payload yet ───────
+    if valid_payload is None:
+        _log_event("forced_finalization_turn", run_id, filename, phase="audit")
+        cr_final, cf, itf, otf, evf, tcf, sidf = _run_one_audit_session(
+            prompt=FORCED_FINALIZATION_PROMPT,
+            model=model,
+            timeout=RUN_TIMEOUT_SEC,
+            target=target,
+            claude_home=claude_home,
+        )
+        total_cost += cf
+        total_in_tok += itf
+        total_out_tok += otf
+        all_events.extend(evf)
+        all_tool_calls.extend(tcf)
+        accumulated_session_id = sidf or accumulated_session_id
+        payload_final = _extract_submit_payload(tcf)
+        if payload_final is not None:
+            submit_attempt += 1
+            _log_event("submit_attempt", run_id, filename, phase="audit", attempt=submit_attempt)
+            vr_final = submit_mod.validate_audit_report(payload_final)
+            if vr_final.ok:
+                _log_event("submit_validation_passed", run_id, filename, phase="audit", attempt=submit_attempt)
+                valid_payload = payload_final
+            else:
+                last_validation_errors = [vars(e) for e in vr_final.errors]
+                _log_event(
+                    "submit_validation_failed", run_id, filename, phase="audit",
+                    attempt=submit_attempt, errors=last_validation_errors,
+                )
+
+    # ── Fallback if still nothing valid ───────────────────────────────────────
+    if valid_payload is None:
+        _log_event("fallback_emitted", run_id, filename, phase="audit")
+        valid_payload = submit_mod.audit_fallback(
+            attempt_count=submit_attempt,
+            validation_errors=last_validation_errors,
+        )
+        fallback = True
+    else:
+        fallback = False
+
+    # ── Map payload to RunResult ───────────────────────────────────────────────
+    raw_status = valid_payload.get("status", "inconclusive")
+    status = raw_status if raw_status in ("candidate", "no_finding", "inconclusive") else "inconclusive"
 
     # Save per-run transcript for all runs so agent output is never lost
-    transcript_path = _save_transcript(run_id, filename, status, events, tool_calls)
+    transcript_path = _save_transcript(run_id, filename, status, all_events, all_tool_calls)
 
     try:
-        cumulative = tracker.record(cost_usd)
+        cumulative = tracker.record(total_cost)
     except budget_mod.BudgetExceededError:
         cumulative = tracker.spent()
 
     result = RunResult(
         status=status,
-        defect_report=defect_report,
-        diagnostic_trigger=diagnostic_trigger,
-        no_finding_reason=no_finding_reason,
+        summary=valid_payload.get("summary", ""),
+        confidence=valid_payload.get("confidence", 0.0),
+        findings=valid_payload.get("findings", []),
+        negative_findings=valid_payload.get("negative_findings", []),
+        diagnostic_trigger=valid_payload.get("diagnostic_trigger", ""),
         raw_stdout=claude_result.stdout[:50_000],
         raw_stderr=claude_result.stderr[:10_000],
-        input_tokens=in_tok,
-        output_tokens=out_tok,
-        cost_usd=cost_usd,
+        input_tokens=total_in_tok,
+        output_tokens=total_out_tok,
+        cost_usd=total_cost,
         duration_seconds=round(duration, 1),
         model=model,
-        transcript_events=events,
+        transcript_events=all_events,
+        submit_attempts=submit_attempt,
+        fallback=fallback,
     )
 
     _log_run(
@@ -319,10 +422,28 @@ def run_audit(
         target=target,
         cumulative_cost=cumulative,
         transcript_path=str(transcript_path) if transcript_path else None,
-        tool_call_count=len(tool_calls),
+        tool_call_count=len(all_tool_calls),
         retry_number=retry_number,
     )
     return result
+
+
+def _log_event(
+    event: str,
+    run_id: str,
+    target_file: str,
+    phase: str = "audit",
+    attempt: int | None = None,
+    errors: list | None = None,
+    session_id: str = "",
+) -> None:
+    """Emit a structured observability event to stdout."""
+    parts = [f"[{event}] phase={phase} run={run_id[:8]} file={target_file}"]
+    if attempt is not None:
+        parts.append(f"attempt={attempt}")
+    if errors:
+        parts.append(f"errors={len(errors)}")
+    print(" ".join(parts))
 
 
 def _log_run(
@@ -347,7 +468,7 @@ def _log_run(
         "run_id": run_id,
         "provider": "claude_code",
         "model": model,
-        "prompt_version": "audit_v1",
+        "prompt_version": "audit_v2",
         "target_file": target_file,
         "repo_revision": target.repo_revision if target else "",
         "container_image": target.container_image if target else "",
@@ -362,11 +483,14 @@ def _log_run(
         "tool_call_count": tool_call_count,
         "transcript_path": transcript_path,
         "retry_number": retry_number,
+        "submit_attempts": result.submit_attempts,
+        "fallback": result.fallback,
         "validation_verdict": None,
         "asan_triggered": None,
-        "defect_report": result.defect_report or None,
+        "summary": result.summary or None,
+        "confidence": result.confidence,
+        "findings_count": len(result.findings),
         "diagnostic_trigger": result.diagnostic_trigger or None,
-        "no_finding_reason": result.no_finding_reason or None,
         "error_message": result.error_message or None,
         "session_id": result.session_id or None,
         "raw_stderr": result.raw_stderr,

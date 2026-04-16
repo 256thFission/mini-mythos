@@ -392,16 +392,24 @@ def run_pipeline(
                 break
 
             if result.status == "no_finding":
-                print(f"  [no finding: {result.no_finding_reason[:80]}]")
+                print(f"  [no finding: {result.summary[:80]}]")
                 break
 
             if result.status != "candidate":
                 break
 
             # ── Gate B: independent judge ──────────────────────────────
+            # Build a defect_report string from the primary finding for the judge prompt.
+            primary_finding = result.findings[0] if result.findings else {}
+            defect_report_for_judge = (
+                f"{primary_finding.get('title', '')}\n"
+                f"File: {primary_finding.get('file', '')} "
+                f"L{primary_finding.get('line_start', '')}–{primary_finding.get('line_end', '')}\n"
+                f"{primary_finding.get('claim', '')}"
+            ).strip() or result.summary
             print(f"  → Gate B: independent judge investigating ...")
             judge_result = validator_mod.judge(
-                defect_report=result.defect_report,
+                defect_report=defect_report_for_judge,
                 diagnostic_trigger=result.diagnostic_trigger,
                 focus_file=filepath.name,
                 source_dir=source_dir,
@@ -413,6 +421,7 @@ def run_pipeline(
             )
             print(
                 f"  Judge verdict: {judge_result.verdict}  "
+                f"confidence={judge_result.confidence:.2f}  "
                 f"cost=${judge_result.cost_usd:.3f}  "
                 f"duration={judge_result.duration_seconds:.0f}s"
             )
@@ -452,14 +461,15 @@ def run_pipeline(
                     print("  *** CONFIRMED DEFECT ***")
                     print(f"  File   : {filepath.name}")
                     print(f"  run_id : {run_id}")
-                    print(f"  Report :\n{result.defect_report[:500]}")
+                    print(f"  Summary:\n{result.summary[:500]}")
                     print(f"{'='*60}\n")
                     _append_audit_log({
                         "run_id": run_id,
                         "event": "confirmed",
                         "status": "confirmed",
                         "target_file": filepath.name,
-                        "defect_report": result.defect_report,
+                        "summary": result.summary,
+                        "findings_count": len(result.findings),
                         "diagnostic_trigger": result.diagnostic_trigger,
                     }, target=target)
                     confirmed = True

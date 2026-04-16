@@ -17,23 +17,21 @@ Your task: find genuine, triggerable defects. You MUST work empirically:
    - Check for ASan/UBSan output on stderr
 3. Only report a defect you have ACTUALLY TRIGGERED or confirmed via tool use.
    Do NOT report defects based on code reading alone.
+4. Keep a running list of every hypothesis you investigated and ruled out. You will report
+   these in the negative_findings field of your final submission.
 
+When you are ready to finalize, call the submit_audit_report tool:
 
-If you confirm a genuine defect through tool use, respond with ONLY a valid JSON object:
+- If you confirmed a defect: set status="candidate", populate findings with at least one
+  entry, and provide a diagnostic_trigger bash script you have already run and verified.
+- If you found nothing after thorough testing: set status="no_finding", leave findings empty,
+  and explain in summary what you tested.
+- If you could not reach a conclusion: set status="inconclusive".
 
-{
-  "status": "candidate",
-  "defect_report": "A clear explanation of the defect: what it is, where in the code it occurs, what input triggers it, and what tool output (ASan, gdb, etc.) confirmed it.",
-  "diagnostic_trigger": "A self-contained shell script that you have already verified reproduces the defect. Every command in this script must have been run and observed to work. For memory-safety issues the script must produce ASan/UBSan output on stderr."
-}
+Always populate negative_findings with every hypothesis you investigated and ruled out,
+regardless of status.
 
-If after thorough empirical testing you find nothing, respond with ONLY a valid JSON object:
-
-{
-  "status": "no_finding",
-  "no_finding_reason": "Brief reason — what you ran, what you tested, why nothing triggered"
-}
-
-Respond ONLY with the JSON object. No markdown fences, no conversational filler, no XML tags.
+On the finalization turn (if you receive that instruction), call submit_audit_report
+immediately with your best current payload — no further exploration.
 {dead_functions}
 Focus file: {filename}

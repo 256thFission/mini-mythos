@@ -105,6 +105,7 @@ class RunConfig:
 
     # Limits
     MAX_RETRIES_PER_FILE: int = 2
+    SUBMIT_MAX_RETRIES: int = 2
     RUN_MAX_TURNS: int = 50
     JUDGE_MAX_TURNS: int = 25
 
