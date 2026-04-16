@@ -24,7 +24,6 @@ PER_RUN_BUDGET_USD = config.PER_RUN_BUDGET_USD
 RUN_TIMEOUT_SEC = config.RUN_TIMEOUT_SEC
 RUN_MAX_TURNS = config.RUN_MAX_TURNS
 
-TRANSCRIPTS_DIR = config.RUNS_DIR / "transcripts"
 
 
 @dataclass
@@ -98,10 +97,14 @@ def _load_prompt(
 
 
 
-def _save_transcript(run_id: str, filename: str, status: str, events: list, tool_calls: list) -> Path:
+def _save_transcript(
+    run_id: str, filename: str, status: str, events: list, tool_calls: list,
+    target_name: str,
+) -> Path:
     """Write a human-readable + machine-parseable transcript for a run."""
-    TRANSCRIPTS_DIR.mkdir(parents=True, exist_ok=True)
-    transcript_path = TRANSCRIPTS_DIR / f"{filename}__{status}__{run_id[:8]}.jsonl"
+    transcripts_dir = config.target_runs_dir(target_name) / "transcripts"
+    transcripts_dir.mkdir(parents=True, exist_ok=True)
+    transcript_path = transcripts_dir / f"{filename}__{status}__{run_id[:8]}.jsonl"
 
     with open(transcript_path, "w") as f:
         # Header
@@ -405,7 +408,8 @@ def run_audit(
     status = raw_status if raw_status in ("candidate", "no_finding", "inconclusive") else "inconclusive"
 
     # Save per-run transcript for all runs so agent output is never lost
-    transcript_path = _save_transcript(run_id, filename, status, all_events, all_tool_calls)
+    transcript_path = _save_transcript(run_id, filename, status, all_events, all_tool_calls,
+                                        target_name=target.name)
 
     try:
         cumulative = tracker.record(total_cost)

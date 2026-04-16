@@ -1,19 +1,24 @@
-"""Submit tool definitions, schemas, and validators.
+"""Host-side wiring for the submit MCP tools.
 
 Two finalisation tools used by the audit and judge agents:
   - submit_audit_report
   - submit_judge_verdict
 
-Validation pipeline per submission:
-  1. Schema validation  (shape / types / basic constraints via jsonschema)
-  2. Semantic validation (status/verdict rules, line ranges, uniqueness, trigger)
-  3. Returns a machine-readable ValidationResult
+Tool metadata (descriptions + JSON Schemas) is the single source of truth in
+``tools/submit_schemas.py``; that file is shared with the in-container MCP
+server (``tools/submit_mcp_server.py``). This module adds host-only concerns:
+  1. MCP config builder + tool-name namespacing
+  2. Schema validation (jsonschema) + semantic validation
+  3. ValidationResult → feedback envelope for the retry loop
+  4. Fallback payloads when no valid submission is received
 """
 
 from __future__ import annotations
 
 import re
+import sys
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 try:
@@ -22,18 +27,25 @@ try:
 except ImportError:
     _HAS_JSONSCHEMA = False
 
+# Share tool metadata with the in-container MCP server. ``tools/submit_schemas.py``
+# is the single source of truth; it's copied into the image by
+# ``docker/Dockerfile`` and imported here on the host.
+_TOOLS_DIR = Path(__file__).resolve().parent.parent / "tools"
+if str(_TOOLS_DIR) not in sys.path:
+    sys.path.insert(0, str(_TOOLS_DIR))
+from submit_schemas import TOOL_SPECS  # noqa: E402
+
 
 # ── MCP server wiring ─────────────────────────────────────────────────────────
 #
-# The submit tools are exposed to the agent via an MCP stdio server
-# (``submit_mcp_server.py``) that lives inside the target container. Claude's
-# ``--tools`` flag only whitelists *built-in* tools; custom tools must be
-# registered through MCP. When the agent invokes these tools, Claude Code
-# namespaces them as ``mcp__<serverName>__<toolName>`` in the stream-json
-# transcript — see ``submit_tool_name()`` below.
+# Claude's ``--tools`` flag only whitelists *built-in* tools; custom tools are
+# registered through an MCP stdio server (``tools/submit_mcp_server.py``) that
+# the CLI spawns inside the container via ``--mcp-config``. When the agent
+# invokes these tools, Claude Code namespaces them as
+# ``mcp__<serverName>__<toolName>`` in the stream-json transcript — see
+# ``submit_tool_name()`` below.
 
 SUBMIT_MCP_SERVER_NAME = "submit"
-SUBMIT_MCP_SCRIPT_BASENAME = "submit_mcp_server.py"
 
 
 def submit_tool_name(base_name: str) -> str:
@@ -55,157 +67,6 @@ def build_submit_mcp_config(script_path: str) -> dict:
             }
         }
     }
-
-
-# ── Tool definitions (used for validation + retry feedback; NOT sent to CLI) ──
-
-SUBMIT_AUDIT_REPORT_TOOL = {
-    "name": "submit_audit_report",
-    "description": (
-        "Finalise your audit. Call this tool once with your complete findings. "
-        "Use status='candidate' if you confirmed a defect, 'no_finding' if you "
-        "found nothing after thorough testing, or 'inconclusive' if you could not "
-        "reach a definitive conclusion."
-    ),
-    "input_schema": {
-        "type": "object",
-        "additionalProperties": False,
-        "required": ["status", "summary", "confidence", "findings", "negative_findings"],
-        "properties": {
-            "status": {
-                "type": "string",
-                "enum": ["candidate", "no_finding", "inconclusive"],
-            },
-            "summary": {"type": "string", "minLength": 10, "maxLength": 4000},
-            "confidence": {"type": "number", "minimum": 0, "maximum": 1},
-            "findings": {
-                "type": "array",
-                "maxItems": 10,
-                "items": {
-                    "type": "object",
-                    "additionalProperties": False,
-                    "required": [
-                        "id", "title", "severity",
-                        "file", "line_start", "line_end",
-                        "claim", "evidence",
-                    ],
-                    "properties": {
-                        "id": {"type": "string", "minLength": 1, "maxLength": 64},
-                        "title": {"type": "string", "minLength": 3, "maxLength": 200},
-                        "severity": {
-                            "type": "string",
-                            "enum": ["low", "medium", "high", "critical"],
-                        },
-                        "cwe": {"type": "string", "pattern": "^CWE-[0-9]+$"},
-                        "file": {"type": "string", "minLength": 1},
-                        "line_start": {"type": "integer", "minimum": 1},
-                        "line_end": {"type": "integer", "minimum": 1},
-                        "claim": {"type": "string", "minLength": 10, "maxLength": 2000},
-                        "evidence": {
-                            "type": "array",
-                            "minItems": 1,
-                            "maxItems": 10,
-                            "items": {
-                                "type": "object",
-                                "additionalProperties": False,
-                                "required": ["type", "content"],
-                                "properties": {
-                                    "type": {
-                                        "type": "string",
-                                        "enum": [
-                                            "asan", "ubsan", "gdb",
-                                            "program_output", "code_path", "other",
-                                        ],
-                                    },
-                                    "content": {
-                                        "type": "string",
-                                        "minLength": 10,
-                                        "maxLength": 8000,
-                                    },
-                                },
-                            },
-                        },
-                    },
-                },
-            },
-            "diagnostic_trigger": {
-                "type": "string",
-                "pattern": "^#!/bin/bash[\\s\\S]*$",
-                "minLength": 12,
-                "maxLength": 12000,
-            },
-            "negative_findings": {
-                "type": "array",
-                "maxItems": 20,
-                "items": {
-                    "type": "object",
-                    "additionalProperties": False,
-                    "required": ["hypothesis", "why_ruled_out"],
-                    "properties": {
-                        "hypothesis": {"type": "string", "minLength": 5, "maxLength": 500},
-                        "why_ruled_out": {"type": "string", "minLength": 5, "maxLength": 2000},
-                    },
-                },
-            },
-        },
-    },
-}
-
-SUBMIT_JUDGE_VERDICT_TOOL = {
-    "name": "submit_judge_verdict",
-    "description": (
-        "Finalise your judge verdict. Call this tool once with your complete assessment. "
-        "Use verdict='CONFIRMED' if you independently verified the finding, "
-        "'RETRY' if the finding has flaws but the vulnerability might exist, "
-        "or 'INTRACTABLE' if no exploit path exists."
-    ),
-    "input_schema": {
-        "type": "object",
-        "additionalProperties": False,
-        "required": ["verdict", "reasoning", "confidence", "checks"],
-        "properties": {
-            "verdict": {
-                "type": "string",
-                "enum": ["CONFIRMED", "RETRY", "INTRACTABLE"],
-            },
-            "reasoning": {"type": "string", "minLength": 20, "maxLength": 5000},
-            "confidence": {"type": "number", "minimum": 0, "maximum": 1},
-            "checks": {
-                "type": "array",
-                "minItems": 1,
-                "maxItems": 20,
-                "items": {
-                    "type": "object",
-                    "additionalProperties": False,
-                    "required": ["name", "result", "evidence"],
-                    "properties": {
-                        "name": {
-                            "type": "string",
-                            "enum": [
-                                "source_guard_check",
-                                "object_symbol_check",
-                                "cross_package_build_check",
-                                "call_path_reachability_check",
-                                "trigger_realism_check",
-                            ],
-                        },
-                        "result": {
-                            "type": "string",
-                            "enum": ["pass", "fail", "not_applicable"],
-                        },
-                        "evidence": {"type": "string", "minLength": 10, "maxLength": 3000},
-                    },
-                },
-            },
-            "verified_trigger": {
-                "type": "string",
-                "minLength": 12,
-                "maxLength": 12000,
-            },
-            "fix_instructions": {"type": "string", "maxLength": 4000},
-        },
-    },
-}
 
 
 # ── Validation result ─────────────────────────────────────────────────────────
@@ -351,28 +212,28 @@ def _validate_judge_semantics(payload: dict) -> list[ValidationError]:
 
 # ── Public entry points ───────────────────────────────────────────────────────
 
-def validate_audit_report(payload: Any) -> ValidationResult:
-    """Full validation pipeline for submit_audit_report payload."""
+def _validate(payload: Any, schema: dict,
+              semantic_fn) -> ValidationResult:
     if not isinstance(payload, dict):
         return ValidationResult(ok=False, errors=[
             ValidationError(code="SCHEMA_ERROR", path="/", hint="Payload must be a JSON object.")
         ])
-    schema_errors = _schema_validate(payload, SUBMIT_AUDIT_REPORT_TOOL["input_schema"])
-    semantic_errors = _validate_audit_semantics(payload)
-    all_errors = schema_errors + semantic_errors
-    return ValidationResult(ok=not all_errors, errors=all_errors)
+    errors = _schema_validate(payload, schema) + semantic_fn(payload)
+    return ValidationResult(ok=not errors, errors=errors)
+
+
+def validate_audit_report(payload: Any) -> ValidationResult:
+    """Full validation pipeline for submit_audit_report payload."""
+    return _validate(payload,
+                     TOOL_SPECS["submit_audit_report"]["schema"],
+                     _validate_audit_semantics)
 
 
 def validate_judge_verdict(payload: Any) -> ValidationResult:
     """Full validation pipeline for submit_judge_verdict payload."""
-    if not isinstance(payload, dict):
-        return ValidationResult(ok=False, errors=[
-            ValidationError(code="SCHEMA_ERROR", path="/", hint="Payload must be a JSON object.")
-        ])
-    schema_errors = _schema_validate(payload, SUBMIT_JUDGE_VERDICT_TOOL["input_schema"])
-    semantic_errors = _validate_judge_semantics(payload)
-    all_errors = schema_errors + semantic_errors
-    return ValidationResult(ok=not all_errors, errors=all_errors)
+    return _validate(payload,
+                     TOOL_SPECS["submit_judge_verdict"]["schema"],
+                     _validate_judge_semantics)
 
 
 # ── Fallback artifacts ────────────────────────────────────────────────────────

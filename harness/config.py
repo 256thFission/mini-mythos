@@ -111,10 +111,10 @@ class RunConfig:
 
     # Docker — shared non-project settings
     CONTAINER_HOME: str = "/audit-home"
-    # Absolute path inside the container where submit_mcp_server.py is copied
-    # by verifier.copy_submit_mcp_server(). Claude spawns it from here via
-    # --mcp-config.
-    CONTAINER_MCP_SERVER_PATH: str = "/audit-home/submit_mcp_server.py"
+    # Absolute path inside the container where submit_mcp_server.py is baked
+    # into the image (see docker/Dockerfile — COPY tools/ /opt/minimythos/tools/).
+    # Claude spawns it from here via --mcp-config.
+    CONTAINER_MCP_SERVER_PATH: str = "/opt/minimythos/tools/submit_mcp_server.py"
 
     # Scoring settings
     MAX_FILE_BYTES: int = 80_000

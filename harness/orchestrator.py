@@ -212,7 +212,7 @@ def run_pipeline(
                     "[orchestrator] ERROR: container could not be started.\n"
                     "  Audit agents run inside Docker — the container is required.\n"
                     f"  Build and start it first:\n"
-                    f"    docker build -t {target.container_image} targets/{target.name}/\n"
+                    f"    docker build -t {target.container_image} -f targets/{target.name}/Dockerfile .\n"
                     f"    docker run -d --name {target.container_name} {target.container_image}"
                 )
                 sys.exit(1)
@@ -223,14 +223,6 @@ def run_pipeline(
             verifier_mod.copy_claude_auth(
                 target.container_name, claude_home, container_home=config.CONTAINER_HOME
             )
-
-        # Copy the submit MCP server so agents can call submit_audit_report /
-        # submit_judge_verdict as real (MCP-registered) tools.
-        verifier_mod.copy_submit_mcp_server(
-            target.container_name,
-            container_home=config.CONTAINER_HOME,
-            dest_path=config.CONTAINER_MCP_SERVER_PATH,
-        )
 
         # ── Preflight: fast host auth check, then Docker probe ───────────────
         print("[orchestrator] Preflight: checking Claude API availability ...")

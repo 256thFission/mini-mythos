@@ -78,46 +78,6 @@ def copy_claude_auth(container_name: str, claude_home: str, container_home: str 
         return False
 
 
-def copy_submit_mcp_server(
-    container_name: str,
-    container_home: str = CONTAINER_HOME,
-    dest_path: str | None = None,
-) -> bool:
-    """Copy the submit MCP stdio server into the container.
-
-    The server is spawned by the Claude CLI (via ``--mcp-config``) to expose
-    ``submit_audit_report`` / ``submit_judge_verdict`` as real tools. It must
-    live inside the container because that's where the CLI runs.
-    """
-    src = Path(__file__).parent / "submit_mcp_server.py"
-    if not src.exists():
-        print(f"[verifier] WARNING: {src} not found — submit MCP server not copied")
-        return False
-    dest = dest_path or f"{container_home}/submit_mcp_server.py"
-    try:
-        subprocess.run(
-            ["docker", "exec", container_name, "mkdir", "-p", container_home],
-            check=True, capture_output=True, timeout=10,
-        )
-        subprocess.run(
-            ["docker", "cp", str(src), f"{container_name}:{dest}"],
-            check=True, capture_output=True, timeout=10,
-        )
-        subprocess.run(
-            ["docker", "exec", container_name, "chown", "audit:audit", dest],
-            check=True, capture_output=True, timeout=10,
-        )
-        subprocess.run(
-            ["docker", "exec", container_name, "chmod", "0755", dest],
-            check=True, capture_output=True, timeout=10,
-        )
-        print(f"[verifier] Copied submit MCP server to {container_name}:{dest}")
-        return True
-    except Exception as e:
-        print(f"[verifier] WARNING: could not copy submit MCP server: {e}")
-        return False
-
-
 def verify_trigger(
     trigger_script: str,
     container_name: str,

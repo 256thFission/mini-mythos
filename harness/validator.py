@@ -25,7 +25,6 @@ JUDGE_MODEL = config.JUDGE_MODEL
 JUDGE_TIMEOUT_SEC = config.JUDGE_TIMEOUT_SEC
 JUDGE_MAX_TURNS = config.JUDGE_MAX_TURNS
 JUDGE_MAX_BUDGET_USD = config.JUDGE_MAX_BUDGET_USD
-JUDGE_TRANSCRIPTS_DIR = config.RUNS_DIR / "judge_transcripts"
 
 FORCED_FINALIZATION_PROMPT = (
     "Finalization turn. Stop investigation now. "
@@ -297,8 +296,9 @@ def judge(
         verdict = "RETRY"
 
     # Save transcript
-    JUDGE_TRANSCRIPTS_DIR.mkdir(parents=True, exist_ok=True)
-    transcript_path = JUDGE_TRANSCRIPTS_DIR / f"judge__{focus_file}__{verdict.lower()}__{run_id[:8]}.jsonl"
+    judge_transcripts_dir = config.target_runs_dir(target.name) / "judge_transcripts"
+    judge_transcripts_dir.mkdir(parents=True, exist_ok=True)
+    transcript_path = judge_transcripts_dir / f"judge__{focus_file}__{verdict.lower()}__{run_id[:8]}.jsonl"
     with open(transcript_path, "w") as f:
         f.write(json.dumps({
             "type": "header", "run_id": run_id, "role": "judge", "focus_file": focus_file,

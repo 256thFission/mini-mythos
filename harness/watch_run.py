@@ -1,7 +1,8 @@
 """Live pretty-printer for audit.jsonl — run in a second terminal alongside the pipeline.
 
 Usage:  python3 -u watch_run.py
-        python3 -u watch_run.py --tail   (follow new events as they land)
+        python3 -u watch_run.py --tail              (follow new events live)
+        python3 -u watch_run.py --target miniupnpd  (per-target log)
 """
 import argparse
 import json
@@ -10,7 +11,7 @@ import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
-from config import config
+from config import config, load_target
 
 COLORS = {
     "score":       "\033[90m",     # grey
@@ -23,6 +24,12 @@ COLORS = {
 }
 RESET = "\033[0m"
 BOLD  = "\033[1m"
+
+
+def _strip_mcp_prefix(name: str) -> str:
+    """'mcp__submit__submit_audit_report' → 'submit_audit_report'"""
+    parts = name.split("__", 2)
+    return parts[-1] if len(parts) == 3 and parts[0] == "mcp" else name
 
 
 def _fmt(r: dict) -> str:
@@ -53,10 +60,9 @@ def _fmt(r: dict) -> str:
     )
 
 
-def dump_all() -> None:
-    log = config.AUDIT_LOG
+def dump_all(log: Path) -> None:
     if not log.exists():
-        print("No audit.jsonl found yet.")
+        print(f"No audit log found at {log}")
         return
     with open(log) as f:
         for line in f:
@@ -68,10 +74,12 @@ def dump_all() -> None:
                     pass
 
 
-def tail() -> None:
-    log = config.AUDIT_LOG
+def tail(log: Path) -> None:
+    if not log.exists():
+        print(f"No audit log found at {log} — start the pipeline first.")
+        return
     print(f"Watching {log} — Ctrl-C to stop\n")
-    with open(log, "a+") as f:
+    with open(log) as f:
         f.seek(0, 2)
         while True:
             line = f.readline()
@@ -89,7 +97,13 @@ def tail() -> None:
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--tail", action="store_true", help="Follow new events live")
+    parser.add_argument(
+        "--target", default=None,
+        help="Target name (default: auto-detected or MINIMYTHOS_TARGET env var)",
+    )
     args = parser.parse_args()
-    dump_all()
+    target = load_target(args.target)
+    log = config.audit_log_path(target.name)
+    dump_all(log)
     if args.tail:
-        tail()
+        tail(log)

@@ -68,7 +68,7 @@ build_dir = "subdir"        # optional: subdirectory within the repo to audit
 Copy `docker/Dockerfile.example` to your target directory, fill in the build commands (autotools and CMake examples are included), then:
 
 ```bash
-docker build -t minimythos_myproject:latest targets/myproject/
+docker build -t minimythos_myproject:latest -f targets/myproject/Dockerfile .
 docker run -d --name minimythos_myproject minimythos_myproject:latest
 ```
 

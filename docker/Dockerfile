@@ -32,7 +32,8 @@ RUN make -f Makefile.linux_nft CC=clang \
     LDLIBS="-lnftnl -lmnl"
 
 # Extract per-file live symbols for dead-code filtering
-COPY extract_symbols.py /tmp/extract_symbols.py
+# NOTE: build context is the repo root — see README (docker build -f docker/Dockerfile .)
+COPY docker/extract_symbols.py /tmp/extract_symbols.py
 RUN python3 /tmp/extract_symbols.py
 
 # Install Node.js and claude CLI so agents run natively inside the container
@@ -40,11 +41,18 @@ RUN apt-get update && apt-get install -y nodejs npm \
     && npm install -g @anthropic-ai/claude-code \
     && rm -rf /var/lib/apt/lists/*
 
+# ── Harness tools (MCP servers, etc.) ─────────────────────────────────────────
+# The submit MCP stdio server exposes submit_audit_report / submit_judge_verdict
+# as real tools for the audit + judge agents (registered via --mcp-config).
+COPY tools/ /opt/minimythos/tools/
+RUN chmod 0755 /opt/minimythos/tools/*.py
+
 # Create non-root audit user — claude refuses --dangerously-skip-permissions as root
 RUN useradd -m -s /bin/bash audit \
     && mkdir -p /audit-home \
     && chown -R audit:audit /audit-home \
-    && chown -R audit:audit /opt/miniupnp
+    && chown -R audit:audit /opt/miniupnp \
+    && chown -R audit:audit /opt/minimythos
 
 # Keep container alive for docker exec
 CMD ["tail", "-f", "/dev/null"]

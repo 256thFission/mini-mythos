@@ -10,7 +10,8 @@
 #   4. Node.js + the claude CLI (for agents to run natively inside the container)
 #   5. A non-root user named "audit" with read/write access to the source tree
 #
-# After building: docker build -t minimythos_<name>:latest .
+# Build from the repo root so the COPY for tools/ resolves:
+#   docker build -t minimythos_<name>:latest -f targets/<name>/Dockerfile .
 # After running:  docker run -d --name minimythos_<name> minimythos_<name>:latest
 #                 docker cp minimythos_<name>:/path/to/src/. src/
 #                 docker cp minimythos_<name>:/path/to/src/reachable_symbols.json \
@@ -80,13 +81,21 @@ RUN apt-get update && apt-get install -y nodejs npm \
     && npm install -g @anthropic-ai/claude-code \
     && rm -rf /var/lib/apt/lists/*
 
+# ── Harness tools (MCP servers, etc.) ─────────────────────────────────────────
+# Copied from the repo-root build context. The submit MCP stdio server is
+# registered via --mcp-config so the audit + judge agents can call
+# submit_audit_report / submit_judge_verdict as real tools.
+COPY tools/ /opt/minimythos/tools/
+RUN chmod 0755 /opt/minimythos/tools/*.py
+
 # ── Non-root audit user ───────────────────────────────────────────────────────
 # claude CLI refuses --dangerously-skip-permissions as root.
 # TODO: update the chown path to match your source tree location
 RUN useradd -m -s /bin/bash audit \
     && mkdir -p /audit-home \
     && chown -R audit:audit /audit-home \
-    && chown -R audit:audit /opt/target
+    && chown -R audit:audit /opt/target \
+    && chown -R audit:audit /opt/minimythos
 
 # Keep container alive for docker exec
 CMD ["tail", "-f", "/dev/null"]

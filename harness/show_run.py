@@ -1,26 +1,21 @@
 """Human-readable viewer for run transcripts, judge transcripts, and the audit log.
 
 Usage:
-    python3 show_run.py                          # list all runs
-    python3 show_run.py <run_id_prefix>          # show audit transcript for that run
-    python3 show_run.py --judge <run_id_prefix>  # show judge transcript for that run
-    python3 show_run.py --log                    # dump the raw audit.jsonl
+    python3 show_run.py [--target NAME]                          # list all runs
+    python3 show_run.py [--target NAME] <run_id_prefix>          # show audit transcript
+    python3 show_run.py [--target NAME] --judge <run_id_prefix>  # show judge transcript
+    python3 show_run.py [--target NAME] --log                    # dump raw audit.jsonl
 """
 
 import json
 import sys
 from pathlib import Path
 
-from config import config
+from config import config, load_target
 
 
-TRANSCRIPTS_DIR = config.RUNS_DIR / "transcripts"
-JUDGE_TRANSCRIPTS_DIR = config.RUNS_DIR / "judge_transcripts"
-
-
-def _read_all_records() -> list[dict]:
+def _read_all_records(audit_log: Path) -> list[dict]:
     """Read all records from audit.jsonl."""
-    audit_log = config.AUDIT_LOG
     if not audit_log.exists():
         return []
     records = []
@@ -35,8 +30,14 @@ def _read_all_records() -> list[dict]:
     return records
 
 
-def list_runs() -> None:
-    records = _read_all_records()
+def _strip_mcp_prefix(name: str) -> str:
+    """'mcp__submit__submit_audit_report' → 'submit_audit_report'"""
+    parts = name.split("__", 2)
+    return parts[-1] if len(parts) == 3 and parts[0] == "mcp" else name
+
+
+def list_runs(audit_log: Path) -> None:
+    records = _read_all_records(audit_log)
     audit_records = [r for r in records if r.get("run_id") and r.get("status")]
     if not audit_records:
         print("No runs recorded yet.")
@@ -66,7 +67,8 @@ def list_runs() -> None:
         r.get("cost_usd", 0) for r in records if r.get("event") == "gate_b"
     )
     print(f"\nAudit spend: ${total:.3f}  Judge spend: ${judge_costs:.3f}  "
-          f"Total: ${total + judge_costs:.3f}  |  Runs: {len(audit_records)}")
+          f"Total: ${total + judge_costs:.3f}  |  Runs: {len(audit_records)}"
+          f"  |  Log: {audit_log}")
 
 
 def _render_transcript(transcript_path: Path, label: str = "AUDIT") -> None:
@@ -99,7 +101,7 @@ def _render_transcript(transcript_path: Path, label: str = "AUDIT") -> None:
                         thinking = block.get("thinking", "")[:500]
                         print(f"\n[THINKING (truncated)]\n{thinking}...")
                     elif btype == "tool_use":
-                        name = block.get("name", "?")
+                        name = _strip_mcp_prefix(block.get("name", "?"))
                         inp = json.dumps(block.get("input", {}))[:300]
                         print(f"\n[TOOL CALL] {name}\n  input: {inp}")
 
@@ -126,14 +128,14 @@ def _render_transcript(transcript_path: Path, label: str = "AUDIT") -> None:
                 print(f"\n[TOOL SUMMARY] {len(calls)} tool calls:")
                 for i, tc in enumerate(calls, 1):
                     inp = json.dumps(tc.get("input", {}))[:100]
-                    print(f"  {i}. {tc.get('name','?')}  input={inp}")
+                    print(f"  {i}. {_strip_mcp_prefix(tc.get('name','?'))}  input={inp}")
 
             elif etype not in ("system", "user", "raw_line"):
                 print(f"\n[{etype.upper()}] {json.dumps(event)[:200]}")
 
 
-def show_transcript(run_id_prefix: str) -> None:
-    matches = list(TRANSCRIPTS_DIR.glob(f"*{run_id_prefix}*.jsonl"))
+def show_transcript(run_id_prefix: str, transcripts_dir: Path) -> None:
+    matches = list(transcripts_dir.glob(f"*{run_id_prefix}*.jsonl"))
     if not matches:
         print(f"No audit transcript found for prefix: {run_id_prefix}")
         return
@@ -143,8 +145,8 @@ def show_transcript(run_id_prefix: str) -> None:
     _render_transcript(matches[0], label="AUDIT")
 
 
-def show_judge_transcript(run_id_prefix: str) -> None:
-    matches = list(JUDGE_TRANSCRIPTS_DIR.glob(f"*{run_id_prefix}*.jsonl"))
+def show_judge_transcript(run_id_prefix: str, judge_transcripts_dir: Path) -> None:
+    matches = list(judge_transcripts_dir.glob(f"*{run_id_prefix}*.jsonl"))
     if not matches:
         print(f"No judge transcript found for prefix: {run_id_prefix}")
         return
@@ -154,24 +156,38 @@ def show_judge_transcript(run_id_prefix: str) -> None:
     _render_transcript(matches[0], label="JUDGE")
 
 
-def dump_log() -> None:
-    records = _read_all_records()
+def dump_log(audit_log: Path) -> None:
+    records = _read_all_records(audit_log)
     for r in records:
         print(json.dumps(r, indent=2))
         print()
 
 
 if __name__ == "__main__":
-    args = sys.argv[1:]
+    import argparse
+    parser = argparse.ArgumentParser(
+        description="View audit runs, transcripts, and logs"
+    )
+    parser.add_argument(
+        "--target", default=None,
+        help="Target name (default: auto-detected or MINIMYTHOS_TARGET env var)",
+    )
+    parser.add_argument("--log", action="store_true", help="Dump raw audit.jsonl")
+    parser.add_argument("--judge", metavar="RUN_ID", help="Show judge transcript")
+    parser.add_argument("run_id", nargs="?", help="Show audit transcript for this run_id prefix")
+    pargs = parser.parse_args()
 
-    if not args:
-        list_runs()
-    elif args[0] == "--log":
-        dump_log()
-    elif args[0] == "--judge":
-        if len(args) < 2:
-            print("Usage: show_run.py --judge <run_id_prefix>")
-        else:
-            show_judge_transcript(args[1])
+    target = load_target(pargs.target)
+    audit_log = config.audit_log_path(target.name)
+    target_runs_dir = config.target_runs_dir(target.name)
+    transcripts_dir = target_runs_dir / "transcripts"
+    judge_transcripts_dir = target_runs_dir / "judge_transcripts"
+
+    if pargs.log:
+        dump_log(audit_log)
+    elif pargs.judge:
+        show_judge_transcript(pargs.judge, judge_transcripts_dir)
+    elif pargs.run_id:
+        show_transcript(pargs.run_id, transcripts_dir)
     else:
-        show_transcript(args[0])
+        list_runs(audit_log)
