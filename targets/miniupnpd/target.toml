@@ -2,17 +2,20 @@
 name = "miniupnpd"
 description = "an open-source UPnP daemon"
 
-[docker]
-container_name = "minimythos_run"
-image = "minimythos:0.1"
-workdir = "/opt/miniupnp/miniupnpd"
-
 [build]
 repo_url = "https://github.com/miniupnp/miniupnp.git"
 repo_revision = "f83b5e2e21aa8dfa393ff80ea287ac4fca1a4df1"
+workdir = "/opt/miniupnp"
 build_dir = "miniupnpd"
-build_commands = [
-    "apt-get install -y libnftnl-dev libmnl-dev",
+
+apt_packages = ["libnftnl-dev", "libmnl-dev"]
+
+commands = [
     "sh configure --leasefile --vendorcfg",
     "make -f Makefile.linux_nft CC=clang CFLAGS='-O1 -g -fno-omit-frame-pointer -fsanitize=address,undefined' LDFLAGS='-fsanitize=address,undefined' LDLIBS='-lnftnl -lmnl'",
 ]
+
+[symbols]
+# miniupnpd's Makefile.linux_nft emits objects flat in the build_dir.
+object_glob = "*.o"
+source_exts = [".c"]

@@ -45,7 +45,9 @@ def _ensure_source_dir(target: TargetConfig, override: str | None) -> Path:
 
     if target.repo_url:
         cache_root = config.source_cache_dir(target.name)
-        build_subdir = cache_root / target.build_dir if target.build_dir else cache_root
+        # src_dir selects the sub-tree we want to *score*, not *build*.
+        scan_subdir = target.src_dir or target.build_dir
+        scan_path = cache_root / scan_subdir if scan_subdir and scan_subdir != "." else cache_root
 
         if not cache_root.exists():
             print(f"[orchestrator] Cloning {target.repo_url} → {cache_root} ...")
@@ -72,10 +74,13 @@ def _ensure_source_dir(target: TargetConfig, override: str | None) -> Path:
                     print(f"[orchestrator] ERROR: git checkout failed:\n{result.stderr}")
                     sys.exit(1)
 
-        if not build_subdir.exists():
-            print(f"[orchestrator] ERROR: build_dir '{target.build_dir}' not found inside cloned repo at {cache_root}.")
+        if not scan_path.exists():
+            print(
+                f"[orchestrator] ERROR: src_dir '{scan_subdir}' not found inside "
+                f"cloned repo at {cache_root}."
+            )
             sys.exit(1)
-        return build_subdir
+        return scan_path
 
     p = Path(target.container_workdir)
     if not p.exists():

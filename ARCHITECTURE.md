@@ -1,6 +1,5 @@
 # MiniMythos Harness Architecture
-
-**Single source of truth for structural decisions.** Read this before modifying `tools/`, `harness/submit_tools.py`, or target paths.
+Read this before modifying `tools/`, `harness/submit_tools.py`, or target paths.
 
 ## Quick Summary
 
@@ -144,10 +143,9 @@ Only `tools/submit_mcp_server.py` is the canonical server. Previously we had `to
 
 ### 4. Target owns its Dockerfile
 Each target directory (`targets/<name>/`) should contain:
-- `target.toml` — metadata
-- `Dockerfile` — build instructions (copied from `docker/Dockerfile.example` as template)
-
-The `miniupnpd` target currently violates this (uses `docker/Dockerfile`). Fix: move it to `targets/miniupnpd/Dockerfile` so the orchestrator error message (`-f targets/<name>/Dockerfile`) works correctly.
+- `target.toml` — metadata and build spec (source of truth)
+- `Dockerfile` — generated from `docker/Dockerfile.tmpl` by `harness/setup_cli.py`.
+  A hand-written Dockerfile at the same path overrides the template (escape hatch).
 
 ### 5. Protocol version currency
 MCP `protocolVersion` fallback in `submit_mcp_server.py` should track the current spec (2025-06-18 as of this writing). The server echoes the client's version when present; the fallback is only for backward compatibility.
@@ -171,10 +169,11 @@ MCP `protocolVersion` fallback in `submit_mcp_server.py` should track the curren
 
 ## Adding a New Target
 
-1. `mkdir targets/myproject && cd targets/myproject`
-2. `cp ../../docker/Dockerfile.example Dockerfile`
-3. Edit `Dockerfile`: clone your repo, build with ASan/UBSan, install Node.js + claude-code.
-4. Create `target.toml`:
+1. Write `targets/myproject/target.toml` (see `docs/ADD_NEW_TARGET.md`).
+2. `python3 harness/setup_cli.py setup myproject` — renders Dockerfile, builds, runs, extracts symbols.
+3. `python3 -u harness/orchestrator.py --target myproject`.
+
+Legacy shape of `target.toml`:
    ```toml
    [project]
    name = "myproject"
@@ -201,7 +200,7 @@ MCP `protocolVersion` fallback in `submit_mcp_server.py` should track the curren
 |---------|---------------|-----|
 | `ModuleNotFoundError: submit_spec` | Trying to run `tools/mcp_server.py` (orphan) | Use `tools/submit_mcp_server.py` only |
 | Schemas out of sync | Edited `submit_schemas.py` but didn't rebuild image | Rebuild container after schema changes |
-| `targets/<name>/Dockerfile not found` | miniupnpd uses `docker/Dockerfile` instead of per-target path | Move Dockerfile into target directory |
+| `reachable_symbols.json` empty (`{}`) | `[symbols].object_glob` doesn't match where the build actually puts `.o` files (e.g. `obj/*.o` vs `*.o`, or `build/**/*.o` for CMake) | Exec into the container, `find . -name '*.o'`, and update the glob |
 | Empty `audit.jsonl` created by `watch_run.py` | `tail()` opened with `"a+"` before pipeline started | Check existence first (already fixed) |
 | Judge transcripts in wrong dir | Legacy fallback path still present | Remove `if target else` branches (already fixed) |
 

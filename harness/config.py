@@ -30,6 +30,17 @@ class TargetConfig:
     repo_url: str = ""
     repo_revision: str = ""
     build_dir: str = ""
+    # Subdirectory under the cloned repo that contains the *.c/*.h files to
+    # score. Defaults to build_dir when unset — they match for most projects.
+    # Dropbear is the counterexample: build_dir="." but src_dir="src".
+    src_dir: str = ""
+    # New template-driven fields (consumed by harness.setup_cli to render a
+    # Dockerfile). When a hand-written Dockerfile exists at the target path,
+    # these are informational only.
+    apt_packages: tuple[str, ...] = ()
+    build_commands: tuple[str, ...] = ()
+    symbols_object_glob: str = "*.o"
+    symbols_source_exts: tuple[str, ...] = (".c",)
 
 
 def load_target(name: str | None = None) -> TargetConfig:
@@ -70,16 +81,27 @@ def load_target(name: str | None = None) -> TargetConfig:
     project = raw.get("project", {})
     docker = raw.get("docker", {})
     build = raw.get("build", {})
+    symbols = raw.get("symbols", {})
+
+    # Support both the new unified schema (workdir in [build]) and the old
+    # split schema ([docker].workdir). New schema wins when both are present.
+    workdir = build.get("workdir") or docker.get("workdir", "")
 
     return TargetConfig(
         name=name,
         description=project.get("description", ""),
         container_name=docker.get("container_name", f"minimythos_{name}"),
         container_image=docker.get("image", f"minimythos_{name}:latest"),
-        container_workdir=docker.get("workdir", ""),
+        container_workdir=workdir,
         repo_url=build.get("repo_url", ""),
         repo_revision=build.get("repo_revision", ""),
         build_dir=build.get("build_dir", ""),
+        src_dir=build.get("src_dir", build.get("build_dir", "")),
+        apt_packages=tuple(build.get("apt_packages", [])),
+        # Accept both the new `commands` key and the legacy `build_commands`.
+        build_commands=tuple(build.get("commands", build.get("build_commands", []))),
+        symbols_object_glob=symbols.get("object_glob", "*.o"),
+        symbols_source_exts=tuple(symbols.get("source_exts", [".c"])),
     )
 
 

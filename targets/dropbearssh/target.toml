@@ -1,0 +1,28 @@
+[project]
+name = "dropbearssh"
+description = "A lightweight open-source SSH server and client"
+
+[build]
+repo_url = "https://github.com/mkj/dropbear.git"
+repo_revision = "c60db6408178aaca0a8aacd017ac344a2cfb30c8"
+workdir = "/opt/dropbear"       # where the repo is cloned inside the container
+build_dir = "."                 # subdir of workdir where build commands run
+src_dir = "src"                 # subdir of the repo that contains the *.c/*.h to score
+
+# apt packages installed on top of the base image (gcc/clang/make/cmake/git/
+# python3/nodejs/npm are already present).
+apt_packages = ["zlib1g-dev"]
+
+# The build runs inside the container as-is, one RUN per command.
+# NOTE: dropbear's bundled libtommath breaks if CFLAGS/LDFLAGS are overridden,
+# so we use MORECFLAGS/MORELDFLAGS which are appended, not substituted.
+commands = [
+    "./configure",
+    "make CC=clang MORECFLAGS='-O1 -g -fno-omit-frame-pointer -fsanitize=address,undefined' MORELDFLAGS='-fsanitize=address,undefined'",
+]
+
+[symbols]
+# Dropbear post-2023 puts objects in obj/ and sources in src/.
+# (Earlier dropbear builds were flat — so "*.o" / "src/*.c" varies by commit.)
+object_glob = "obj/*.o"
+source_exts = [".c"]

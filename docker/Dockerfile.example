@@ -60,20 +60,12 @@ RUN git checkout <COMMIT_HASH>
 #       && cmake --build build -j$(nproc)
 
 # ── Extract reachable symbols (dead-code filtering) ───────────────────────────
-# This scans compiled .o files and maps each source file to its exported symbols.
+# Scans compiled *.o files in the given directory and writes reachable_symbols.json.
 # The harness uses this to skip files with zero live symbols before LLM scoring.
 #
-# TODO: update the glob pattern if .o files are in a subdirectory (e.g. build/*.o)
-RUN python3 -c "\
-import json, subprocess, glob, os; \
-result = {}; \
-for obj in sorted(glob.glob('**/*.o', recursive=True)): \
-    src = os.path.basename(obj).replace('.o', '.c'); \
-    out = subprocess.run(['nm', '-g', '--defined-only', obj], capture_output=True, text=True); \
-    funcs = [l.split()[-1] for l in out.stdout.splitlines() if ' T ' in l]; \
-    result[src] = funcs; \
-json.dump(result, open('reachable_symbols.json','w'), indent=2); \
-print(f'Wrote reachable_symbols.json: {len(result)} files, {sum(len(v) for v in result.values())} symbols')"
+# TODO: change the argument if your .o files live in a subdirectory (e.g. build/)
+COPY docker/extract_symbols.py /usr/local/bin/extract_symbols.py
+RUN python3 /usr/local/bin/extract_symbols.py /opt/target
 
 # ── Install Node.js and claude CLI ────────────────────────────────────────────
 # Agents run natively inside the container via docker exec.

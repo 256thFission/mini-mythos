@@ -172,6 +172,13 @@ def score_directory(
         list(source_dir.glob("*.c")) + list(source_dir.glob("*.h"))
     )
 
+    if not files:
+        print(
+            f"[scorer] WARNING: 0 *.c/*.h files found at {source_dir} (flat glob, non-recursive).\n"
+            f"  Sources probably live in a subdirectory (e.g. src/). Retry with:\n"
+            f"    --source-dir {source_dir}/src"
+        )
+
     # Filter out dead files using per-target reachable_symbols.json
     symbols = _load_reachable_symbols(target)
     dead_files: set[str] = set()
@@ -180,10 +187,18 @@ def score_directory(
         print(
             f"[scorer] WARNING: reachable_symbols.json not found at {expected_path}\n"
             f"  Dead-code filtering is DISABLED — all {len(files)} files will be scored.\n"
-            f"  To enable it, copy the file from the container after building:\n"
-            f"    mkdir -p {expected_path.parent}\n"
-            f"    docker cp {target.container_name}:{target.container_workdir}/reachable_symbols.json"
-            f" {expected_path}"
+            f"  Re-run:  python3 harness/setup_cli.py setup {target.name}"
+        )
+    elif len(symbols) == 0 or sum(len(v) for v in symbols.values()) == 0:
+        expected_path = config.reachable_symbols_path(target.name)
+        print(
+            f"[scorer] WARNING: reachable_symbols.json at {expected_path} is EMPTY.\n"
+            f"  This almost always means [symbols].object_glob in target.toml doesn't\n"
+            f"  match where the build puts *.o files. Debug inside the container:\n"
+            f"    docker exec {target.container_name} find {target.container_workdir} -name '*.o' | head\n"
+            f"  Update [symbols].object_glob in targets/{target.name}/target.toml, then\n"
+            f"  re-run:  python3 harness/setup_cli.py setup {target.name}\n"
+            f"  Dead-code filtering is DISABLED — all {len(files)} files will be scored."
         )
     else:
         for fname, syms in symbols.items():

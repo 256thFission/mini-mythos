@@ -45,50 +45,54 @@ View [Current Progress](#current-progress) to read current progress & yapping.
 
 ### 1. Configure your target
 
-Create `targets/<name>/target.toml`:
+Create `targets/<name>/target.toml` — this is the **only** file you need to
+write. See `@docs/ADD_NEW_TARGET.md` for the full schema and a Cursor prompt
+that fills it in from a GitHub URL.
 
 ```toml
 [project]
 name = "myproject"
 description = "a short description"
 
-[docker]
-container_name = "minimythos_myproject"
-image = "minimythos_myproject:latest"
-workdir = "/opt/myproject"
-
 [build]
 repo_url = "https://github.com/example/myproject.git"
-repo_revision = "abc123"
-build_dir = "subdir"        # optional: subdirectory within the repo to audit
+repo_revision = "abc123"              # pin a commit SHA
+workdir = "/opt/myproject"            # inside-container source path
+build_dir = "."                       # subdir where commands run
+apt_packages = ["libssl-dev"]         # extras on top of the base image
+
+commands = [
+    "./configure",
+    "make CC=clang CFLAGS='-O1 -g -fno-omit-frame-pointer -fsanitize=address,undefined' LDFLAGS='-fsanitize=address,undefined'",
+]
+
+[symbols]
+object_glob = "*.o"                   # "build/**/*.o" for CMake
+source_exts = [".c"]                  # add ".cc"/".cpp" for C++
 ```
 
-### 2. Build the instrumented container
-
-Copy `docker/Dockerfile.example` to your target directory, fill in the build commands (autotools and CMake examples are included), then:
+### 2. Set up the container
 
 ```bash
-docker build -t minimythos_myproject:latest -f targets/myproject/Dockerfile .
-docker run -d --name minimythos_myproject minimythos_myproject:latest
+python3 harness/setup_cli.py setup myproject
 ```
 
-### 3. Copy the symbol map to the host
+That renders `targets/myproject/Dockerfile` from `docker/Dockerfile.tmpl`,
+builds the image, starts the container, and copies `reachable_symbols.json`
+to `runs/targets/myproject/`. Re-run any time you change `target.toml`.
 
-The `docker build` step already generated `reachable_symbols.json` inside the container (via `nm` over every compiled `.o` file). Just copy it out:
+**Escape hatch:** if your project can't fit the template (exotic base image,
+multi-stage build, patches), drop a hand-written `targets/<name>/Dockerfile`
+in place. `setup_cli` detects it and uses it verbatim.
+
+**Pitfall:** if the project's Makefile hard-codes `CFLAGS`/`LDFLAGS` and
+breaks on override (e.g. dropbear's bundled libtommath), use the append-only
+knob the project exposes — usually `MORECFLAGS` / `MORELDFLAGS`.
+
+### 3. Run
 
 ```bash
-mkdir -p runs/targets/myproject
-docker cp minimythos_myproject:/opt/myproject/reachable_symbols.json \
-    runs/targets/myproject/reachable_symbols.json
-```
-
-Enables dead-code filtering. If you skip it, the harness scores all files anyway.
-
-### 4. Run
-
-```bash
-cd harness
-python3 -u orchestrator.py --target myproject
+python3 -u harness/orchestrator.py --target myproject
 ```
 
 **Flags:**
