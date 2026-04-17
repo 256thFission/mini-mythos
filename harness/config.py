@@ -79,27 +79,32 @@ def load_target(name: str | None = None) -> TargetConfig:
 
     raw = tomllib.loads(toml_path.read_text())
     project = raw.get("project", {})
-    docker = raw.get("docker", {})
     build = raw.get("build", {})
     symbols = raw.get("symbols", {})
 
-    # Support both the new unified schema (workdir in [build]) and the old
-    # split schema ([docker].workdir). New schema wins when both are present.
-    workdir = build.get("workdir") or docker.get("workdir", "")
+    # Schema is strictly defined in [build] section - no backwards compatibility
+    workdir = build.get("workdir", "")
+    if not workdir:
+        print(f"[config] ERROR: {toml_path} missing [build].workdir")
+        sys.exit(1)
+
+    commands = build.get("commands", [])
+    if not commands:
+        print(f"[config] ERROR: {toml_path} missing [build].commands")
+        sys.exit(1)
 
     return TargetConfig(
         name=name,
         description=project.get("description", ""),
-        container_name=docker.get("container_name", f"minimythos_{name}"),
-        container_image=docker.get("image", f"minimythos_{name}:latest"),
+        container_name=f"minimythos_{name}",
+        container_image=f"minimythos_{name}:latest",
         container_workdir=workdir,
         repo_url=build.get("repo_url", ""),
         repo_revision=build.get("repo_revision", ""),
         build_dir=build.get("build_dir", ""),
         src_dir=build.get("src_dir", build.get("build_dir", "")),
         apt_packages=tuple(build.get("apt_packages", [])),
-        # Accept both the new `commands` key and the legacy `build_commands`.
-        build_commands=tuple(build.get("commands", build.get("build_commands", []))),
+        build_commands=tuple(commands),
         symbols_object_glob=symbols.get("object_glob", "*.o"),
         symbols_source_exts=tuple(symbols.get("source_exts", [".c"])),
     )

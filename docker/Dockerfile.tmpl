@@ -9,7 +9,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 # Base toolchain + anything the target-specific build needs.
 RUN apt-get update && apt-get install -y \
     gcc clang make cmake gdb git python3 python3-pip curl nodejs npm \
-    {{apt_packages}} \
+{{apt_packages}}
     && rm -rf /var/lib/apt/lists/*
 
 # Claude Code CLI — agents run natively inside the container.

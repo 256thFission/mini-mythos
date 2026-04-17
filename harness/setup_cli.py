@@ -22,6 +22,8 @@ import argparse
 import shutil
 import subprocess
 import sys
+import time
+import uuid
 from pathlib import Path
 
 _HARNESS_DIR = Path(__file__).resolve().parent
@@ -39,9 +41,10 @@ TMPL_PATH = REPO_ROOT / "docker" / "Dockerfile.tmpl"
 
 def _build_workdir(target: TargetConfig) -> str:
     """Absolute path inside the container where build commands run."""
+    workdir = Path(target.container_workdir)
     if target.build_dir and target.build_dir not in (".", ""):
-        return f"{target.container_workdir.rstrip('/')}/{target.build_dir.strip('/')}"
-    return target.container_workdir
+        return str(workdir / target.build_dir)
+    return str(workdir)
 
 
 def render_dockerfile(target: TargetConfig) -> str:
@@ -60,10 +63,21 @@ def render_dockerfile(target: TargetConfig) -> str:
         )
         sys.exit(2)
 
-    run_lines = "\n".join(f"RUN {cmd}" for cmd in target.build_commands)
+    # Bug 4 & 7 fix: Escape newlines in commands to prevent injection; handle empty apt_packages
+    def escape_dockerfile_cmd(cmd: str) -> str:
+        # Prevent command injection via newlines - only allow single-line RUN instructions
+        return cmd.replace('\n', ' ').replace('\r', ' ')
+
+    run_lines = "\n".join(f"RUN {escape_dockerfile_cmd(cmd)}" for cmd in target.build_commands)
+
+    # Bug 4 fix: Handle empty apt_packages - omit the line entirely if empty
+    apt_packages_line = " ".join(target.apt_packages)
+    if apt_packages_line:
+        apt_packages_line += " \\"
+
     ctx = {
         "name": target.name,
-        "apt_packages": " ".join(target.apt_packages),
+        "apt_packages": apt_packages_line,
         "repo_url": target.repo_url,
         "repo_revision": target.repo_revision,
         "workdir": target.container_workdir,
@@ -73,8 +87,20 @@ def render_dockerfile(target: TargetConfig) -> str:
         "source_exts": ",".join(target.symbols_source_exts),
     }
     tmpl = TMPL_PATH.read_text()
+    # Use a placeholder that won't appear in values to prevent double-replacement
+    placeholder_prefix = uuid.uuid4().hex[:16]
+    placeholders = {}
+
+    # First pass: replace {{key}} with unique placeholders
     for key, val in ctx.items():
-        tmpl = tmpl.replace("{{" + key + "}}", val)
+        placeholder = f"__{placeholder_prefix}_{key}__"
+        placeholders[placeholder] = val
+        tmpl = tmpl.replace("{{" + key + "}}", placeholder)
+
+    # Second pass: replace placeholders with actual values
+    for placeholder, val in placeholders.items():
+        tmpl = tmpl.replace(placeholder, val)
+
     return tmpl
 
 
@@ -138,11 +164,20 @@ def cmd_setup(args: argparse.Namespace) -> None:
         cwd=str(REPO_ROOT),
     )
 
-    # 2. Replace container
+    # 2. Replace container (with verification to avoid race condition)
     subprocess.run(
         ["docker", "rm", "-f", target.container_name],
         capture_output=True,
     )
+    # Wait up to 10s for container to actually disappear
+    for _ in range(20):
+        result = subprocess.run(
+            ["docker", "ps", "-a", "--filter", f"name=^{target.container_name}$", "--format", "{{.Names}}"],
+            capture_output=True, text=True,
+        )
+        if target.container_name not in result.stdout:
+            break
+        time.sleep(0.5)
     _run([
         "docker", "run", "-d",
         "--name", target.container_name,

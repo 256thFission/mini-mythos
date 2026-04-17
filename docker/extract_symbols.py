@@ -17,8 +17,8 @@ Notes:
 - ``--source-exts`` is a comma-separated list of candidate source extensions.
   The extractor tries each in order to recover the source filename from an
   object filename (strips ``.o`` then appends). Defaults to ``.c`` only.
-- Name collisions (two ``util.c`` in different subdirs) are *merged* into one
-  entry; this is acceptable for dead-code filtering.
+- Source names include their relative directory path (e.g., ``src/main.c``)
+  to avoid merging files with the same basename in different directories.
 """
 import argparse
 import glob
@@ -30,24 +30,40 @@ from pathlib import Path
 
 
 def _source_name(obj_path: str, source_exts: list[str]) -> str:
-    """Map an object path → a source filename (basename + one candidate ext).
+    """Map an object path → a source filename (relative path + one candidate ext).
 
     CMake emits ``foo.c.o`` (keeping the original extension); autotools emits
     ``foo.o``. Handle both.
+
+    Returns a relative path like ``src/main.c`` instead of just ``main.c``
+    to avoid incorrectly merging files with the same basename in different
+    directories (e.g., ``util.c`` in both ``src/`` and ``lib/``).
     """
-    name = Path(obj_path).name  # strip directory
+    obj = Path(obj_path)
+    name = obj.name
+    parent = obj.parent
+
     # CMake: foo.c.o → foo.c already has the source ext
     stem_once = name[: -len('.o')] if name.endswith('.o') else name
     for ext in source_exts:
         if stem_once.endswith(ext):
-            return stem_once  # already has a known source ext (CMake style)
+            src_name = stem_once  # already has a known source ext (CMake style)
+            return str(parent / src_name) if str(parent) != '.' else src_name
+
     # Autotools: foo.o → try foo + each ext, pick first that exists on disk
     base = stem_once
     for ext in source_exts:
-        if list(glob.iglob(f'**/{base}{ext}', recursive=True)):
-            return base + ext
-    # Fall back to the first configured extension
-    return base + source_exts[0]
+        # Search relative to the object file's directory, not globally
+        search_dir = parent if str(parent) != '.' else Path('.')
+        candidates = list(search_dir.glob(f'**/{base}{ext}'))
+        if candidates:
+            # Use the relative path from workdir to the found source
+            src_path = candidates[0]
+            return str(src_path)
+
+    # Fall back to the first configured extension, preserving directory
+    src_name = base + source_exts[0]
+    return str(parent / src_name) if str(parent) != '.' else src_name
 
 
 def extract(workdir: str, object_glob: str, source_exts: list[str]) -> None:
