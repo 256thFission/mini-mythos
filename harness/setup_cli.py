@@ -10,8 +10,6 @@ the target directory — that always wins as an escape hatch), then:
 
     1. ``docker build -t <image> -f targets/<name>/Dockerfile .``
     2. ``docker rm -f <container>`` (if present) + ``docker run -d --name ...``
-    3. ``docker cp <container>:<build_workdir>/reachable_symbols.json
-                  runs/targets/<name>/reachable_symbols.json``
 
 After this, ``orchestrator.py --target <name>`` is the only remaining step.
 """
@@ -83,8 +81,6 @@ def render_dockerfile(target: TargetConfig) -> str:
         "workdir": target.container_workdir,
         "build_workdir": _build_workdir(target),
         "build_run_lines": run_lines,
-        "object_glob": target.symbols_object_glob,
-        "source_exts": ",".join(target.symbols_source_exts),
     }
     tmpl = TMPL_PATH.read_text()
     # Use a placeholder that won't appear in values to prevent double-replacement
@@ -184,17 +180,10 @@ def cmd_setup(args: argparse.Namespace) -> None:
         target.container_image,
     ])
 
-    # 3. Copy the symbol map out
-    dest = config.reachable_symbols_path(target.name)
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    src = f"{target.container_name}:{_build_workdir(target)}/reachable_symbols.json"
-    _run(["docker", "cp", src, str(dest)])
-
     print()
     print(f"[setup] OK — {target.name} is ready.")
     print(f"        image      : {target.container_image}")
     print(f"        container  : {target.container_name}")
-    print(f"        symbols    : {dest}")
     print(f"        next step  : python3 -u harness/orchestrator.py --target {target.name}")
 
 

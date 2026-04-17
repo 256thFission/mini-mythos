@@ -4,9 +4,10 @@ Read this before modifying `tools/`, `harness/submit_tools.py`, or target paths.
 ## Quick Summary
 
 - **Container runs the agent** — Claude Code executes inside Docker with ASan/UBSan-instrumented binaries.
-- **Host validates submissions** — The container's MCP server accepts any tool call; the host parses the stream-json transcript and enforces schema/semantics.
+- **MCP server validates submissions** — The container's MCP server (`tools/submit_mcp_server.py`) performs real-time schema + semantic validation. Invalid submissions return tool errors; Claude retries in-session.
+- **Host accepts final submissions** — The host extracts the last accepted (non-error) submit from the transcript and re-validates defensively.
 - **Per-target isolation** — All runtime artifacts (`audit.jsonl`, transcripts, symbols, scores) live under `runs/targets/<name>/`.
-- **Schema lives in `tools/`** — Both container and host import `tools/submit_schemas.py`. Never duplicate.
+- **Schema lives in `tools/`** — Both container and host import `tools/submit_schemas.py` and `tools/submit_validators.py`. Never duplicate.
 
 ---
 
@@ -27,12 +28,12 @@ mini-mythos/
 │
 ├── tools/                 # Files copied into the container image (see Dockerfile)
 │   ├── submit_mcp_server.py   # In-container MCP stdio server (spawned by Claude CLI)
-│   └── submit_schemas.py      # SINGLE SOURCE OF TRUTH: tool specs + JSON Schemas
+│   ├── submit_schemas.py      # SINGLE SOURCE OF TRUTH: tool specs + JSON Schemas
+│   └── submit_validators.py   # SHARED validation logic (schema + semantic checks)
 │
 ├── docker/
 │   ├── Dockerfile         # Build for miniupnpd target (example concrete target)
-│   ├── Dockerfile.example # Template for new targets
-│   └── extract_symbols.py # Post-build symbol extraction for dead-code filtering
+│   └── Dockerfile.example # Template for new targets
 │
 ├── targets/
 │   └── miniupnpd/
@@ -43,7 +44,6 @@ mini-mythos/
 │       └── <name>/
 │           ├── audit.jsonl           # Central event log (scores, runs, gates)
 │           ├── scores.json             # Risk-score cache
-│           ├── reachable_symbols.json  # ASan-reachable symbols per file
 │           ├── transcripts/            # Per-audit-run transcripts
 │           └── judge_transcripts/      # Per-judge-run transcripts
 │
@@ -61,7 +61,7 @@ Runs on the developer machine. Responsible for:
 1. **Target loading** — `config.load_target()` reads `targets/<name>/target.toml` into `TargetConfig`.
 2. **Scoring** — `scorer.score_directory()` prioritizes files (1-5) using Haiku.
 3. **Audit loop** — `runner.run_audit()` spawns Claude inside the container for each high-scoring file.
-4. **Validation** — `submit_tools.validate_audit_report()` parses the stream-json `tool_use` event; invalid payloads trigger retry feedback.
+4. **Acceptance** — Host extracts the last non-error `submit_audit_report` tool call from the transcript and re-validates defensively (single attempt + optional forced-finalization turn).
 5. **Judging** — `validator.judge()` runs a second Claude session to verify "candidate" findings.
 6. **Budget tracking** — `budget.BudgetTracker` enforces hard USD caps across the session.
 
@@ -70,24 +70,26 @@ Runs on the developer machine. Responsible for:
 Runs inside Docker. The container image contains:
 - The target source code (e.g., miniupnpd) compiled with ASan/UBSan.
 - `tools/submit_mcp_server.py` — MCP stdio server exposing `submit_audit_report` and `submit_judge_verdict`.
+- `mcp` and `jsonschema` Python packages (installed via pip in the Dockerfile).
 
 Claude Code is invoked with `--mcp-config <json>` which tells it to spawn the submit server. Tool calls appear in the stream-json transcript as:
 ```json
 {"type": "tool_use", "name": "mcp__submit__submit_audit_report", "input": {...}}
 ```
 
-The MCP server **does not validate** — it returns a success envelope immediately. The host parses the transcript, extracts the `input`, and runs full schema + semantic validation.
+The MCP server **performs real validation** using `tools/submit_validators.py`. Invalid submissions return a tool result with `is_error=True` and a structured feedback payload. Claude sees this error and retries in-session without host involvement. Only valid submissions receive `is_error=False` and are considered "accepted" by the harness.
 
 ---
 
-## Single Source of Truth: `tools/submit_schemas.py`
+## Single Source of Truth: `tools/submit_schemas.py` + `tools/submit_validators.py`
 
-**Critical invariant:** Both the container and the host must agree on tool names, descriptions, and JSON Schemas.
+**Critical invariant:** Both the container and the host must agree on tool names, descriptions, JSON Schemas, and validation logic.
 
 **Pattern:**
 - **`tools/submit_schemas.py`** defines `TOOL_SPECS: dict[str, dict[str, Any]]` with `description` and `schema` for each tool.
-- **Container:** `tools/submit_mcp_server.py` imports `TOOL_SPECS` to advertise tools in `tools/list`.
-- **Host:** `harness/submit_tools.py` imports `TOOL_SPECS` and uses the schemas for validation via `jsonschema`.
+- **`tools/submit_validators.py`** defines `validate_audit_report()`, `validate_judge_verdict()`, and `validate_by_tool()` — shared schema + semantic validation.
+- **Container:** `tools/submit_mcp_server.py` imports both modules and calls validators on every `tools/call`. Invalid calls raise, producing `is_error=True` tool results.
+- **Host:** `harness/submit_tools.py` re-exports from `tools/` for defensive re-checking and fallback generation.
 
 **Never duplicate schemas.** If you need to change a field:
 1. Edit `tools/submit_schemas.py`.
@@ -115,7 +117,6 @@ The harness uses `submit_tools.submit_tool_name("submit_audit_report")` → `"mc
 |----------|------------------------|
 | Audit log | `runs/targets/<name>/audit.jsonl` |
 | Score cache | `runs/targets/<name>/scores.json` |
-| Reachable symbols | `runs/targets/<name>/reachable_symbols.json` |
 | Audit transcripts | `runs/targets/<name>/transcripts/` |
 | Judge transcripts | `runs/targets/<name>/judge_transcripts/` |
 | Source cache | `sources/<name>/` |
@@ -132,22 +133,25 @@ The harness uses `submit_tools.submit_tool_name("submit_audit_report")` → `"mc
 
 ## Key Invariants
 
-### 1. Container-side code is stdlib-only
-`tools/submit_mcp_server.py` and `tools/submit_schemas.py` cannot import third-party packages (no `jsonschema`, no `pydantic`). The Dockerfile does not install them. Keep these files pure stdlib.
+### 1. Shared validation in `tools/`
+`tools/submit_validators.py` contains the validation logic used by **both** container and host. It depends on `jsonschema` (optional — validation skips if unavailable). The Dockerfile installs `mcp` and `jsonschema` so the MCP server can validate tool calls in real-time.
 
-### 2. Host-side code owns validation
-`harness/submit_tools.py` uses `jsonschema` (if available) plus hand-written semantic checks (e.g., `status=candidate` requires `diagnostic_trigger`). Invalid submissions result in retry feedback injected back into the agent context.
+### 2. MCP server owns first-line validation
+`tools/submit_mcp_server.py` performs schema + semantic validation on every tool call. Invalid payloads return `is_error=True` with structured feedback; Claude retries in-session. The host only sees successfully validated submissions (defensive re-check + fallback generation).
 
-### 3. No duplicate MCP servers
+### 3. No retry loops in harness
+The host no longer drives per-field retry loops (`SUBMIT_MAX_RETRIES` removed). Instead, the harness issues one main session, extracts the last accepted submit, and optionally issues a single forced-finalization turn if nothing valid arrived.
+
+### 4. No duplicate MCP servers
 Only `tools/submit_mcp_server.py` is the canonical server. Previously we had `tools/mcp_server.py` (orphan, broken import) and `tools/mcp_tool_specs.py` (orphan content file) — both deleted.
 
-### 4. Target owns its Dockerfile
+### 5. Target owns its Dockerfile
 Each target directory (`targets/<name>/`) should contain:
 - `target.toml` — metadata and build spec (source of truth)
 - `Dockerfile` — generated from `docker/Dockerfile.tmpl` by `harness/setup_cli.py`.
   A hand-written Dockerfile at the same path overrides the template (escape hatch).
 
-### 5. Protocol version currency
+### 6. Protocol version currency
 MCP `protocolVersion` fallback in `submit_mcp_server.py` should track the current spec (2025-06-18 as of this writing). The server echoes the client's version when present; the fallback is only for backward compatibility.
 
 ---
@@ -157,13 +161,16 @@ MCP `protocolVersion` fallback in `submit_mcp_server.py` should track the curren
 1. **Orchestrator** calls `runner.run_audit(file, target)` with `target: TargetConfig`.
 2. **Runner** spawns Claude inside container with `--mcp-config` pointing to `submit_mcp_server.py`.
 3. **Agent** investigates, calls `submit_audit_report(status="candidate", ...)`.
-4. **MCP server** returns `{"content": [{"type": "text", "text": "submit_audit_report received"}]}`.
-5. **Host** parses the stream-json `tool_use` event, extracts `input`, runs `submit_tools.validate_audit_report(input)`.
-6. If valid: **Runner** logs "audit_run" to `runs/targets/<name>/audit.jsonl` with status "candidate".
-7. **Orchestrator** sees candidate, calls `validator.judge()` for independent verification.
-8. **Validator** spawns second Claude session, agent calls `submit_judge_verdict(verdict="CONFIRMED", ...)`.
-9. Host validates, logs "gate_b" + final "confirmed" to audit log.
-10. **Budget tracker** updates cumulative spend; if exceeded, pipeline exits.
+4. **MCP server** validates the payload via `submit_validators.validate_audit_report()`:
+   - If invalid: returns `is_error=True` with feedback; Claude retries in-session.
+   - If valid: returns `is_error=False` with acknowledgment.
+5. **Host** parses the stream-json transcript, extracts the last non-error `submit_audit_report` tool call, and re-validates defensively.
+6. If accepted: **Runner** logs "audit_run" to `runs/targets/<name>/audit.jsonl` with status "candidate" and `validation_errors: []`.
+7. If no valid submit arrived: **Runner** issues forced-finalization turn and re-checks; on failure emits fallback with `validation_errors` populated.
+8. **Orchestrator** sees candidate, calls `validator.judge()` for independent verification.
+9. **Validator** spawns second Claude session; agent calls `submit_judge_verdict(verdict="CONFIRMED", ...)` with MCP-side validation.
+10. Host accepts, logs "gate_b" + final "confirmed" to audit log.
+11. **Budget tracker** updates cumulative spend; if exceeded, pipeline exits.
 
 ---
 
@@ -198,11 +205,11 @@ Legacy shape of `target.toml`:
 
 | Pitfall | Why it happens | Fix |
 |---------|---------------|-----|
-| `ModuleNotFoundError: submit_spec` | Trying to run `tools/mcp_server.py` (orphan) | Use `tools/submit_mcp_server.py` only |
-| Schemas out of sync | Edited `submit_schemas.py` but didn't rebuild image | Rebuild container after schema changes |
-| `reachable_symbols.json` empty (`{}`) | `[symbols].object_glob` doesn't match where the build actually puts `.o` files (e.g. `obj/*.o` vs `*.o`, or `build/**/*.o` for CMake) | Exec into the container, `find . -name '*.o'`, and update the glob |
+| `ModuleNotFoundError: mcp` | Old container image without `mcp`/`jsonschema` | Rebuild with `python3 -m harness.setup_cli setup <target>` |
+| Schemas out of sync | Edited `submit_schemas.py` but didn't rebuild image | Rebuild container; host and container share `tools/` via COPY |
+| Validation logic divergence | Edited `harness/submit_tools.py` instead of `tools/submit_validators.py` | Put all validation in `tools/submit_validators.py` only |
 | Empty `audit.jsonl` created by `watch_run.py` | `tail()` opened with `"a+"` before pipeline started | Check existence first (already fixed) |
-| Judge transcripts in wrong dir | Legacy fallback path still present | Remove `if target else` branches (already fixed) |
+| `submit_attempts` always 1 | Expected — host no longer drives retries | Check transcript for `is_error=True` submit calls to see in-session retries |
 
 ---
 
@@ -211,11 +218,12 @@ Legacy shape of `target.toml`:
 | File | Purpose | Can edit? |
 |------|---------|-----------|
 | `tools/submit_schemas.py` | Tool specs + JSON Schemas (SSOT) | Yes — but rebuild image after |
-| `tools/submit_mcp_server.py` | In-container MCP server | Yes — keep stdlib-only |
-| `harness/submit_tools.py` | Host-side validation, MCP wiring | Yes |
+| `tools/submit_validators.py` | Shared validation logic (schema + semantic) | Yes — but rebuild image after |
+| `tools/submit_mcp_server.py` | In-container MCP server (validates tool calls) | Yes — uses `mcp` SDK |
+| `harness/submit_tools.py` | Host-side re-exports, MCP config builder, fallbacks | Yes |
 | `harness/config.py` | TargetConfig, RunConfig, path helpers | Yes — add per-target paths here |
 | `harness/orchestrator.py` | Main pipeline entry | Yes |
-| `harness/runner.py` | Audit run lifecycle | Yes |
+| `harness/runner.py` | Audit run lifecycle (extracts submits, forced finalization) | Yes |
 | `harness/validator.py` | Judge phase | Yes |
 
 ---
@@ -223,5 +231,6 @@ Legacy shape of `target.toml`:
 ## Version History
 
 - **2025-06-18** — MCP `protocolVersion` bumped to current spec.
+- **2025-06-18** — Real MCP validation: `tools/submit_mcp_server.py` now validates tool calls using `tools/submit_validators.py`. Invalid submissions return `is_error=True`; Claude retries in-session. Host retry loops removed; `SUBMIT_MAX_RETRIES` deleted.
 - **2025-04** — Per-target paths introduced; legacy flat `runs/` structure removed.
 - **2025-04** — `tools/mcp_server.py` and `tools/mcp_tool_specs.py` deleted (orphans).

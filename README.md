@@ -62,10 +62,6 @@ commands = [
     "./configure",
     "make CC=clang CFLAGS='-O1 -g -fno-omit-frame-pointer -fsanitize=address,undefined' LDFLAGS='-fsanitize=address,undefined'",
 ]
-
-[symbols]
-object_glob = "*.o"                   # "build/**/*.o" for CMake
-source_exts = [".c"]                  # add ".cc"/".cpp" for C++
 ```
 
 ### 2. Set up the container
@@ -75,8 +71,7 @@ python3 harness/setup_cli.py setup myproject
 ```
 
 That renders `targets/myproject/Dockerfile` from `docker/Dockerfile.tmpl`,
-builds the image, starts the container, and copies `reachable_symbols.json`
-to `runs/targets/myproject/`.
+builds the image, and starts the container.
 
 **WARNING:** If your project needs exotic build steps (custom base image,
 multi-stage build, pre-build patches), Your're on your own. Write to `targets/<name>/Dockerfile`. The setup CLI detects it, Use `--force-render` to overwrite.

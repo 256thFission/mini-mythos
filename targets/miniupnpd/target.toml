@@ -15,11 +15,6 @@ commands = [
     "make -f Makefile.linux_nft CC=clang CFLAGS='-O1 -g -fno-omit-frame-pointer -fsanitize=address,undefined' LDFLAGS='-fsanitize=address,undefined' LDLIBS='-lnftnl -lmnl'",
 ]
 
-[symbols]
-# miniupnpd's Makefile.linux_nft emits objects flat in the build_dir.
-object_glob = "*.o"
-source_exts = [".c"]
-
 [binaries]
 # Pre-built, ASan/UBSan-instrumented binaries. Rendered into the audit prompt
 # so the agent runs them directly instead of trying to rebuild the tree.

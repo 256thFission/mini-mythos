@@ -21,12 +21,6 @@ commands = [
     "make CC=clang MORECFLAGS='-O1 -g -fno-omit-frame-pointer -fsanitize=address,undefined' MORELDFLAGS='-fsanitize=address,undefined'",
 ]
 
-[symbols]
-# Dropbear post-2023 puts objects in obj/ and sources in src/.
-# (Earlier dropbear builds were flat — so "*.o" / "src/*.c" varies by commit.)
-object_glob = "obj/*.o"
-source_exts = [".c"]
-
 [binaries]
 # Pre-built, ASan/UBSan-instrumented binaries. Rendered into the audit prompt
 # so the agent runs them directly instead of trying to rebuild the tree.

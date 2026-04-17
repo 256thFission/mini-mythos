@@ -9,11 +9,15 @@ ENV DEBIAN_FRONTEND=noninteractive
 # Base toolchain + anything the target-specific build needs.
 RUN apt-get update && apt-get install -y \
     gcc clang make cmake gdb git python3 python3-pip curl nodejs npm \
-    libnftnl-dev libmnl-dev \
+libnftnl-dev libmnl-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # Claude Code CLI — agents run natively inside the container.
 RUN npm install -g @anthropic-ai/claude-code
+
+# Python deps for the submit MCP stdio server (tools/submit_mcp_server.py).
+# --break-system-packages is safe here: this image is single-purpose.
+RUN pip install --no-cache-dir --break-system-packages mcp jsonschema
 
 # Clone + pin in a single layer so the cache never holds a stale HEAD.
 RUN git clone https://github.com/miniupnp/miniupnp.git /opt/miniupnp \
@@ -24,11 +28,6 @@ WORKDIR /opt/miniupnp/miniupnpd
 # ── Build steps (from [build].commands in target.toml) ────────────────────────
 RUN sh configure --leasefile --vendorcfg
 RUN make -f Makefile.linux_nft CC=clang CFLAGS='-O1 -g -fno-omit-frame-pointer -fsanitize=address,undefined' LDFLAGS='-fsanitize=address,undefined' LDLIBS='-lnftnl -lmnl'
-
-# ── Dead-code filtering: map each compiled object → exported symbols ──────────
-COPY docker/extract_symbols.py /usr/local/bin/extract_symbols.py
-RUN python3 /usr/local/bin/extract_symbols.py /opt/miniupnp/miniupnpd \
-    --object-glob '*.o' --source-exts '.c'
 
 # ── Harness tools (MCP submit server) baked in ────────────────────────────────
 COPY tools/ /opt/minimythos/tools/
@@ -41,10 +40,12 @@ RUN useradd -m -s /bin/bash audit \
     && chown -R audit:audit /opt/miniupnp \
     && chown -R audit:audit /opt/minimythos
 
-# Lock *existing files* read-only so the audit agent cannot patch the
-# Makefile, edit source, or overwrite cached .o files (which any `make`
-# rebuild does first). Directories stay writable so miniupnpd can still
-# create its lease file / PID file / unix socket inside its tree at runtime.
+# Lock *existing files* in the build tree read-only so the audit agent cannot
+# patch the Makefile, edit source, or overwrite cached .o files (which is what
+# any `make` rebuild would do first). Directories stay writable so running the
+# instrumented binaries can still create runtime artifacts inside their own
+# tree (hostkeys, lease files, PID files, unix sockets, logs). Scratch work
+# for the agent's own test programs still belongs under $HOME (/audit-home).
 RUN find /opt/miniupnp -type f -exec chmod a-w {} +
 
 CMD ["tail", "-f", "/dev/null"]

@@ -39,8 +39,6 @@ class TargetConfig:
     # these are informational only.
     apt_packages: tuple[str, ...] = ()
     build_commands: tuple[str, ...] = ()
-    symbols_object_glob: str = "*.o"
-    symbols_source_exts: tuple[str, ...] = (".c",)
     # Absolute paths (inside the container) of pre-built, ASan/UBSan-instrumented
     # binaries the audit agent should run directly. Rendered into the audit
     # prompt so the agent doesn't waste turns rebuilding.
@@ -84,7 +82,6 @@ def load_target(name: str | None = None) -> TargetConfig:
     raw = tomllib.loads(toml_path.read_text())
     project = raw.get("project", {})
     build = raw.get("build", {})
-    symbols = raw.get("symbols", {})
     binaries_tbl = raw.get("binaries", {})
     if not isinstance(binaries_tbl, dict):
         print(f"[config] ERROR: {toml_path} [binaries] must be a table with a 'paths' array")
@@ -116,8 +113,6 @@ def load_target(name: str | None = None) -> TargetConfig:
         src_dir=build.get("src_dir", build.get("build_dir", "")),
         apt_packages=tuple(build.get("apt_packages", [])),
         build_commands=tuple(commands),
-        symbols_object_glob=symbols.get("object_glob", "*.o"),
-        symbols_source_exts=tuple(symbols.get("source_exts", [".c"])),
         binaries=tuple(binaries_tbl.get("paths", [])),
     )
 
@@ -144,7 +139,6 @@ class RunConfig:
 
     # Limits
     MAX_RETRIES_PER_FILE: int = 2
-    SUBMIT_MAX_RETRIES: int = 2
     RUN_MAX_TURNS: int = 50
     JUDGE_MAX_TURNS: int = 25
 
@@ -194,9 +188,6 @@ class RunConfig:
 
     def score_cache_path(self, target_name: str) -> Path:
         return self.target_runs_dir(target_name) / "scores.json"
-
-    def reachable_symbols_path(self, target_name: str) -> Path:
-        return self.target_runs_dir(target_name) / "reachable_symbols.json"
 
     def source_cache_dir(self, target_name: str) -> Path:
         return self.BASE_DIR / "sources" / target_name

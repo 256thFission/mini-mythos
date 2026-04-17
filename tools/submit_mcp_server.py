@@ -1,90 +1,74 @@
 #!/usr/bin/env python3
-"""Minimal MCP stdio server for submit_audit_report / submit_judge_verdict.
+"""MCP stdio server for submit_audit_report / submit_judge_verdict.
 
-Zero-dependency JSON-RPC 2.0 / MCP stdio implementation. Spawned inside the
-target container by the Claude CLI via ``--mcp-config``. The server accepts any
-arguments and returns a success envelope; the harness validates the payload
-from the stream-json ``tool_use`` event and drives retries there.
-
-Tool metadata (names, descriptions, schemas) lives in ``submit_schemas.py``
-(sibling module) so the harness can share it without duplication.
+Built on the official ``mcp`` Python SDK (low-level ``Server`` API). Validates
+payloads against the shared schemas in ``submit_schemas.py`` + semantic rules
+in ``submit_validators.py``. On invalid input the tool call returns an error
+result so Claude sees ``is_error=True`` and retries *inside its own session*
+— the harness no longer drives schema-validation retries.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import sys
+from pathlib import Path
 from typing import Any
 
-from submit_schemas import TOOL_SPECS
+# Make sibling modules importable when launched directly (no package install).
+_HERE = Path(__file__).resolve().parent
+if str(_HERE) not in sys.path:
+    sys.path.insert(0, str(_HERE))
+
+from submit_schemas import TOOL_SPECS  # noqa: E402
+from submit_validators import validate_by_tool  # noqa: E402
+
+from mcp.server import Server  # noqa: E402
+from mcp.server.stdio import stdio_server  # noqa: E402
+import mcp.types as types  # noqa: E402
+
 
 SERVER_NAME = "submit"
-SERVER_VERSION = "0.2.0"
-
-TOOLS: list[dict[str, Any]] = [
-    {"name": name, "description": spec["description"], "inputSchema": spec["schema"]}
-    for name, spec in TOOL_SPECS.items()
-]
+server: Server = Server(SERVER_NAME)
 
 
-def _write(msg: dict[str, Any]) -> None:
-    sys.stdout.write(json.dumps(msg) + "\n")
-    sys.stdout.flush()
+@server.list_tools()
+async def _list_tools() -> list[types.Tool]:
+    return [
+        types.Tool(
+            name=name,
+            description=spec["description"],
+            inputSchema=spec["schema"],
+        )
+        for name, spec in TOOL_SPECS.items()
+    ]
 
 
-def _result(req_id: Any, result: dict[str, Any]) -> None:
-    _write({"jsonrpc": "2.0", "id": req_id, "result": result})
+@server.call_tool()
+async def _call_tool(name: str, arguments: dict[str, Any]) -> list[types.TextContent]:
+    result = validate_by_tool(name, arguments)
+    if result.ok:
+        return [types.TextContent(type="text", text=f"{name} accepted")]
+
+    feedback = result.to_feedback(attempt=1, attempts_remaining=1)
+    # Raising here causes the SDK to return a CallToolResult with
+    # isError=True and the exception message as the text content — which
+    # Claude surfaces to the model as a tool_result error so it can fix and
+    # resubmit without the harness having to intervene.
+    raise ValueError(json.dumps(feedback, indent=2))
 
 
-def _error(req_id: Any, code: int, message: str) -> None:
-    _write({"jsonrpc": "2.0", "id": req_id, "error": {"code": code, "message": message}})
-
-
-def main() -> None:
-    for raw in sys.stdin:
-        raw = raw.strip()
-        if not raw:
-            continue
-        try:
-            msg = json.loads(raw)
-        except json.JSONDecodeError:
-            continue
-
-        method = msg.get("method", "")
-        req_id = msg.get("id")
-        params = msg.get("params") or {}
-        is_notification = "id" not in msg
-
-        if method == "initialize":
-            _result(req_id, {
-                "protocolVersion": params.get("protocolVersion") or "2025-06-18",
-                "capabilities": {"tools": {}},
-                "serverInfo": {"name": SERVER_NAME, "version": SERVER_VERSION},
-            })
-        elif is_notification:
-            continue
-        elif method == "tools/list":
-            _result(req_id, {"tools": TOOLS})
-        elif method == "tools/call":
-            name = params.get("name", "")
-            if name not in TOOL_SPECS:
-                _error(req_id, -32602, f"unknown tool: {name}")
-            else:
-                _result(req_id, {
-                    "content": [{"type": "text", "text": f"{name} received"}],
-                    "isError": False,
-                })
-        elif method == "ping":
-            _result(req_id, {})
-        elif method in ("shutdown", "exit"):
-            _result(req_id, {})
-            if method == "exit":
-                return
-        else:
-            _error(req_id, -32601, f"method not found: {method}")
+async def _main() -> None:
+    async with stdio_server() as (read_stream, write_stream):
+        await server.run(
+            read_stream,
+            write_stream,
+            server.create_initialization_options(),
+        )
 
 
 if __name__ == "__main__":
     try:
-        main()
-    except BrokenPipeError:
+        asyncio.run(_main())
+    except (BrokenPipeError, KeyboardInterrupt):
         pass

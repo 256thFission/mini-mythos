@@ -144,17 +144,6 @@ def score_file(
     return score
 
 
-def _load_reachable_symbols(target: TargetConfig) -> dict[str, list[str]] | None:
-    """Load per-target reachable_symbols.json if it exists. Returns {filename: [symbols]} or None."""
-    path = config.reachable_symbols_path(target.name)
-    if not path.exists():
-        return None
-    try:
-        return json.loads(path.read_text())
-    except (json.JSONDecodeError, OSError):
-        return None
-
-
 def score_directory(
     source_dir: str | Path,
     tracker: budget_mod.BudgetTracker,
@@ -164,7 +153,6 @@ def score_directory(
     """Score all .c and .h files. Returns list sorted by score descending.
 
     Files already present in the per-target scores.json are skipped (cache hit).
-    Files with zero exported symbols in reachable_symbols.json are skipped (dead code).
     """
     source_dir = Path(source_dir)
 
@@ -178,35 +166,6 @@ def score_directory(
             f"  Sources probably live in a subdirectory (e.g. src/). Retry with:\n"
             f"    --source-dir {source_dir}/src"
         )
-
-    # Filter out dead files using per-target reachable_symbols.json
-    symbols = _load_reachable_symbols(target)
-    dead_files: set[str] = set()
-    if symbols is None:
-        expected_path = config.reachable_symbols_path(target.name)
-        print(
-            f"[scorer] WARNING: reachable_symbols.json not found at {expected_path}\n"
-            f"  Dead-code filtering is DISABLED — all {len(files)} files will be scored.\n"
-            f"  Re-run:  python3 harness/setup_cli.py setup {target.name}"
-        )
-    elif len(symbols) == 0 or sum(len(v) for v in symbols.values()) == 0:
-        expected_path = config.reachable_symbols_path(target.name)
-        print(
-            f"[scorer] WARNING: reachable_symbols.json at {expected_path} is EMPTY.\n"
-            f"  This almost always means [symbols].object_glob in target.toml doesn't\n"
-            f"  match where the build puts *.o files. Debug inside the container:\n"
-            f"    docker exec {target.container_name} find {target.container_workdir} -name '*.o' | head\n"
-            f"  Update [symbols].object_glob in targets/{target.name}/target.toml, then\n"
-            f"  re-run:  python3 harness/setup_cli.py setup {target.name}\n"
-            f"  Dead-code filtering is DISABLED — all {len(files)} files will be scored."
-        )
-    else:
-        for fname, syms in symbols.items():
-            if len(syms) == 0:
-                dead_files.add(fname)
-        if dead_files:
-            print(f"[scorer] Skipping {len(dead_files)} dead-code file(s): {sorted(dead_files)}")
-            files = [f for f in files if f.name not in dead_files]
 
     cache = load_cached_scores(target)
     to_score = [f for f in files if f.name not in cache]

@@ -12,7 +12,6 @@ from pathlib import Path
 import budget as budget_mod
 from claude_client import invoke_claude
 from config import config, TargetConfig
-import preprocessor as preprocessor_mod
 import submit_tools as submit_mod
 
 
@@ -78,7 +77,6 @@ def _load_prompt(
     filename: str,
     target: TargetConfig,
     retry_handoff: str | None = None,
-    dead_fn_annotation: str = "",
 ) -> str:
     template = AUDIT_PROMPT_PATH.read_text()
     # [binaries].paths is required by load_target, so target.binaries is non-empty.
@@ -90,7 +88,6 @@ def _load_prompt(
         .replace("{project_description}", target.description)
         .replace("{source_dir}", target.container_workdir)
         .replace("{binaries}", binaries_block)
-        .replace("{dead_functions}", dead_fn_annotation)
     )
     if retry_handoff:
         prompt = prompt + RETRY_HANDOFF_HEADER.replace("{retry_handoff}", retry_handoff)
@@ -211,14 +208,9 @@ def run_audit(
     if harness_flags is None:
         harness_flags = []
 
-    compiled_symbols = preprocessor_mod.load_symbols_for_file(filename, target)
-    dead_fn_annotation = preprocessor_mod.dead_function_annotation(
-        Path(source_dir) / filename, compiled_symbols
-    )
     prompt = _load_prompt(
         filename, target=target,
         retry_handoff=retry_handoff,
-        dead_fn_annotation=dead_fn_annotation,
     )
 
     # No need to reset the workdir between runs: the build tree is mounted
@@ -234,7 +226,6 @@ def run_audit(
     all_tool_calls: list = []
     accumulated_session_id = ""
     submit_attempt = 0
-    max_submit_retries = config.SUBMIT_MAX_RETRIES
 
     # ── Main session (turns 1..max_turns) ────────────────────────────────────
     first_prompt = RESUME_CONTINUATION_PROMPT if resume_session_id else prompt
@@ -312,67 +303,38 @@ def run_audit(
         _log_run(run_id, filename, file_score, model, result, tracker, harness_flags, target=target)
         return result
 
-    # ── Submit tool extraction + validation loop ───────────────────────────────
+    # ── Submit extraction + host-side re-validation ───────────────────────────
+    # Schema validation now happens in the MCP server (tools/submit_mcp_server.py);
+    # malformed submits come back to Claude as tool_result errors so the agent
+    # retries *inside its own session*. The harness just picks up the last
+    # accepted submit and re-validates defensively. If there isn't one, we
+    # issue a single forced-finalization turn and re-check.
     last_validation_errors: list[dict] = []
     valid_payload: dict | None = None
 
-    payload = _extract_submit_payload(all_tool_calls)
-    if payload is not None:
+    def _accept(payload: dict | None) -> dict | None:
+        """Re-validate host-side. On success return payload, else record errors."""
+        nonlocal last_validation_errors, submit_attempt
+        if payload is None:
+            return None
         submit_attempt += 1
         _log_event("submit_attempt", run_id, filename, phase="audit", attempt=submit_attempt)
         vr = submit_mod.validate_audit_report(payload)
         if vr.ok:
-            _log_event("submit_validation_passed", run_id, filename, phase="audit", attempt=submit_attempt)
-            valid_payload = payload
-        else:
-            last_validation_errors = [vars(e) for e in vr.errors]
-            _log_event(
-                "submit_validation_failed", run_id, filename, phase="audit",
-                attempt=submit_attempt, errors=last_validation_errors,
-            )
-            # Retry loop: return validation feedback to the agent
-            while submit_attempt <= max_submit_retries and valid_payload is None:
-                attempts_remaining = max_submit_retries - submit_attempt
-                feedback = vr.to_feedback(submit_attempt, attempts_remaining)
-                feedback_prompt = (
-                    "Your submit_audit_report call failed validation. "
-                    "Fix the errors below and call submit_audit_report again.\n\n"
-                    + json.dumps(feedback, indent=2)
-                )
-                cr2, c2, it2, ot2, ev2, tc2, sid2 = _run_one_audit_session(
-                    prompt=feedback_prompt,
-                    model=model,
-                    timeout=RUN_TIMEOUT_SEC,
-                    target=target,
-                    claude_home=claude_home,
-                    resume_session_id=accumulated_session_id or None,
-                )
-                total_cost += c2
-                total_in_tok += it2
-                total_out_tok += ot2
-                all_events.extend(ev2)
-                all_tool_calls.extend(tc2)
-                accumulated_session_id = sid2 or accumulated_session_id
-                payload2 = _extract_submit_payload(tc2)
-                if payload2 is None:
-                    break
-                submit_attempt += 1
-                _log_event("submit_attempt", run_id, filename, phase="audit", attempt=submit_attempt)
-                vr = submit_mod.validate_audit_report(payload2)
-                if vr.ok:
-                    _log_event("submit_validation_passed", run_id, filename, phase="audit", attempt=submit_attempt)
-                    valid_payload = payload2
-                else:
-                    last_validation_errors = [vars(e) for e in vr.errors]
-                    _log_event(
-                        "submit_validation_failed", run_id, filename, phase="audit",
-                        attempt=submit_attempt, errors=last_validation_errors,
-                    )
+            _log_event("submit_validation_passed", run_id, filename,
+                       phase="audit", attempt=submit_attempt)
+            return payload
+        last_validation_errors = [vars(e) for e in vr.errors]
+        _log_event("submit_validation_failed", run_id, filename,
+                   phase="audit", attempt=submit_attempt,
+                   errors=last_validation_errors)
+        return None
 
-    # ── Forced finalization turn (max_turns + 1) if no valid payload yet ───────
+    valid_payload = _accept(_extract_submit_payload(all_tool_calls))
+
     if valid_payload is None:
         _log_event("forced_finalization_turn", run_id, filename, phase="audit")
-        cr_final, cf, itf, otf, evf, tcf, sidf = _run_one_audit_session(
+        _cr_final, cf, itf, otf, evf, tcf, sidf = _run_one_audit_session(
             prompt=FORCED_FINALIZATION_TEMPLATE.replace("{filename}", filename),
             model=model,
             timeout=RUN_TIMEOUT_SEC,
@@ -386,20 +348,7 @@ def run_audit(
         all_events.extend(evf)
         all_tool_calls.extend(tcf)
         accumulated_session_id = sidf or accumulated_session_id
-        payload_final = _extract_submit_payload(tcf)
-        if payload_final is not None:
-            submit_attempt += 1
-            _log_event("submit_attempt", run_id, filename, phase="audit", attempt=submit_attempt)
-            vr_final = submit_mod.validate_audit_report(payload_final)
-            if vr_final.ok:
-                _log_event("submit_validation_passed", run_id, filename, phase="audit", attempt=submit_attempt)
-                valid_payload = payload_final
-            else:
-                last_validation_errors = [vars(e) for e in vr_final.errors]
-                _log_event(
-                    "submit_validation_failed", run_id, filename, phase="audit",
-                    attempt=submit_attempt, errors=last_validation_errors,
-                )
+        valid_payload = _accept(_extract_submit_payload(tcf))
 
     # ── Fallback if still nothing valid ───────────────────────────────────────
     if valid_payload is None:
@@ -450,6 +399,7 @@ def run_audit(
         transcript_path=str(transcript_path) if transcript_path else None,
         tool_call_count=len(all_tool_calls),
         retry_number=retry_number,
+        validation_errors=last_validation_errors if fallback else [],
     )
     return result
 
@@ -484,6 +434,7 @@ def _log_run(
     transcript_path: str | None = None,
     tool_call_count: int = 0,
     retry_number: int = 0,
+    validation_errors: list | None = None,
 ) -> None:
     """Append run record to per-target audit.jsonl."""
     from datetime import datetime, timezone
@@ -510,7 +461,7 @@ def _log_run(
         "retry_number": retry_number,
         "submit_attempts": result.submit_attempts,
         "fallback": result.fallback,
-        "validation_verdict": None,
+        "validation_errors": validation_errors or [],
         "asan_triggered": None,
         "summary": result.summary or None,
         "confidence": result.confidence,

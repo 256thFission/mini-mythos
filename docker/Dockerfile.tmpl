@@ -15,6 +15,10 @@ RUN apt-get update && apt-get install -y \
 # Claude Code CLI — agents run natively inside the container.
 RUN npm install -g @anthropic-ai/claude-code
 
+# Python deps for the submit MCP stdio server (tools/submit_mcp_server.py).
+# --break-system-packages is safe here: this image is single-purpose.
+RUN pip install --no-cache-dir --break-system-packages mcp jsonschema
+
 # Clone + pin in a single layer so the cache never holds a stale HEAD.
 RUN git clone {{repo_url}} {{workdir}} \
     && git -C {{workdir}} checkout {{repo_revision}}
@@ -23,11 +27,6 @@ WORKDIR {{build_workdir}}
 
 # ── Build steps (from [build].commands in target.toml) ────────────────────────
 {{build_run_lines}}
-
-# ── Dead-code filtering: map each compiled object → exported symbols ──────────
-COPY docker/extract_symbols.py /usr/local/bin/extract_symbols.py
-RUN python3 /usr/local/bin/extract_symbols.py {{build_workdir}} \
-    --object-glob '{{object_glob}}' --source-exts '{{source_exts}}'
 
 # ── Harness tools (MCP submit server) baked in ────────────────────────────────
 COPY tools/ /opt/minimythos/tools/

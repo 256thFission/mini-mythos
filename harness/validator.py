@@ -62,10 +62,17 @@ def _extract_submit_payload(tool_calls: list[dict]) -> dict | None:
     (``mcp__submit__submit_judge_verdict``).
     """
     for tc in reversed(tool_calls):
-        if tc.get("name") in _SUBMIT_JUDGE_TOOL_NAMES:
-            payload = tc.get("input")
-            if isinstance(payload, dict):
-                return payload
+        if tc.get("name") not in _SUBMIT_JUDGE_TOOL_NAMES:
+            continue
+        # Skip submits the MCP server rejected as invalid. A submit whose
+        # result never came back (default is_error=False placeholder) is
+        # still considered, since stream-json can cut off before the
+        # result arrives.
+        if tc.get("is_error"):
+            continue
+        payload = tc.get("input")
+        if isinstance(payload, dict):
+            return payload
     return None
 
 
@@ -152,7 +159,6 @@ def judge(
     all_events: list = []
     all_tool_calls: list = []
     submit_attempt = 0
-    max_submit_retries = config.SUBMIT_MAX_RETRIES
 
     # ── Main session ─────────────────────────────────────────────────────────
     claude_result, cost, in_tok, out_tok, events, tool_calls = _run_one_judge_session(
@@ -200,63 +206,37 @@ def judge(
         _log_judge(run_id, result, focus_file, target=target)
         return result
 
-    # ── Submit tool extraction + validation loop ───────────────────────────────
+    # ── Submit extraction + host-side re-validation ───────────────────────────
+    # Schema validation is enforced by the MCP server; malformed submits are
+    # surfaced to Claude as tool_result errors so the judge retries inside
+    # its own session. The harness just accepts the last non-error submit
+    # and re-validates defensively, falling back to one forced-finalization
+    # turn if nothing arrived.
     last_validation_errors: list[dict] = []
     valid_payload: dict | None = None
 
-    payload = _extract_submit_payload(all_tool_calls)
-    if payload is not None:
+    def _accept(payload: dict | None) -> dict | None:
+        nonlocal last_validation_errors, submit_attempt
+        if payload is None:
+            return None
         submit_attempt += 1
         _log_event("submit_attempt", run_id, focus_file, phase="judge", attempt=submit_attempt)
         vr = submit_mod.validate_judge_verdict(payload)
         if vr.ok:
-            _log_event("submit_validation_passed", run_id, focus_file, phase="judge", attempt=submit_attempt)
-            valid_payload = payload
-        else:
-            last_validation_errors = [vars(e) for e in vr.errors]
-            _log_event(
-                "submit_validation_failed", run_id, focus_file, phase="judge",
-                attempt=submit_attempt, errors=last_validation_errors,
-            )
-            while submit_attempt <= max_submit_retries and valid_payload is None:
-                attempts_remaining = max_submit_retries - submit_attempt
-                feedback = vr.to_feedback(submit_attempt, attempts_remaining)
-                feedback_prompt = (
-                    "Your submit_judge_verdict call failed validation. "
-                    "Fix the errors below and call submit_judge_verdict again.\n\n"
-                    + json.dumps(feedback, indent=2)
-                )
-                cr2, c2, it2, ot2, ev2, tc2 = _run_one_judge_session(
-                    prompt=feedback_prompt,
-                    model=model,
-                    target=target,
-                    claude_home=claude_home,
-                )
-                total_cost += c2
-                total_in_tok += it2
-                total_out_tok += ot2
-                all_events.extend(ev2)
-                all_tool_calls.extend(tc2)
-                payload2 = _extract_submit_payload(tc2)
-                if payload2 is None:
-                    break
-                submit_attempt += 1
-                _log_event("submit_attempt", run_id, focus_file, phase="judge", attempt=submit_attempt)
-                vr = submit_mod.validate_judge_verdict(payload2)
-                if vr.ok:
-                    _log_event("submit_validation_passed", run_id, focus_file, phase="judge", attempt=submit_attempt)
-                    valid_payload = payload2
-                else:
-                    last_validation_errors = [vars(e) for e in vr.errors]
-                    _log_event(
-                        "submit_validation_failed", run_id, focus_file, phase="judge",
-                        attempt=submit_attempt, errors=last_validation_errors,
-                    )
+            _log_event("submit_validation_passed", run_id, focus_file,
+                       phase="judge", attempt=submit_attempt)
+            return payload
+        last_validation_errors = [vars(e) for e in vr.errors]
+        _log_event("submit_validation_failed", run_id, focus_file,
+                   phase="judge", attempt=submit_attempt,
+                   errors=last_validation_errors)
+        return None
 
-    # ── Forced finalization turn ───────────────────────────────────────────
+    valid_payload = _accept(_extract_submit_payload(all_tool_calls))
+
     if valid_payload is None:
         _log_event("forced_finalization_turn", run_id, focus_file, phase="judge")
-        cr_final, cf, itf, otf, evf, tcf = _run_one_judge_session(
+        _cr_final, cf, itf, otf, evf, tcf = _run_one_judge_session(
             prompt=FORCED_FINALIZATION_PROMPT,
             model=model,
             target=target,
@@ -267,20 +247,7 @@ def judge(
         total_out_tok += otf
         all_events.extend(evf)
         all_tool_calls.extend(tcf)
-        payload_final = _extract_submit_payload(tcf)
-        if payload_final is not None:
-            submit_attempt += 1
-            _log_event("submit_attempt", run_id, focus_file, phase="judge", attempt=submit_attempt)
-            vr_final = submit_mod.validate_judge_verdict(payload_final)
-            if vr_final.ok:
-                _log_event("submit_validation_passed", run_id, focus_file, phase="judge", attempt=submit_attempt)
-                valid_payload = payload_final
-            else:
-                last_validation_errors = [vars(e) for e in vr_final.errors]
-                _log_event(
-                    "submit_validation_failed", run_id, focus_file, phase="judge",
-                    attempt=submit_attempt, errors=last_validation_errors,
-                )
+        valid_payload = _accept(_extract_submit_payload(tcf))
 
     # ── Fallback ─────────────────────────────────────────────────────────────
     if valid_payload is None:

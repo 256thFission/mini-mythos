@@ -47,5 +47,5 @@ regardless of status.
 
 On the finalization turn (if you receive that instruction), call submit_audit_report
 immediately with your best current payload — no further exploration.
-{dead_functions}
+
 Focus file: {filename}

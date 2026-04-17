@@ -6,9 +6,8 @@ Two steps:
 2. Run `python3 harness/setup_cli.py setup <name>`.
 
 That's it. The setup CLI renders a Dockerfile from `docker/Dockerfile.tmpl`,
-builds the image, starts the container, and copies `reachable_symbols.json`
-to `runs/targets/<name>/`. After that, `python3 -u harness/orchestrator.py
---target <name>` runs the audit.
+builds the image, and starts the container. After that,
+`python3 -u harness/orchestrator.py --target <name>` runs the audit.
 
 If your project is too unusual for the template (custom base image, multi-stage
 build, pre-build patches, etc.), drop a hand-written `targets/<name>/Dockerfile`
@@ -37,13 +36,6 @@ commands = [                   # one RUN per element, executed in order
     "./configure",
     "make CC=clang CFLAGS='-O1 -g -fno-omit-frame-pointer -fsanitize=address,undefined' LDFLAGS='-fsanitize=address,undefined'",
 ]
-
-[symbols]
-# Glob for compiled .o files, relative to the build_dir. The extractor maps
-# each object → source by basename lookup, so names must be unique across
-# included subdirs (collisions are silently merged).
-object_glob = "*.o"            # autotools flat: "*.o" — CMake: "build/**/*.o"
-source_exts = [".c"]           # add ".cc"/".cpp"/".cxx" for C++ projects
 ```
 
 ---
@@ -62,9 +54,8 @@ at it on GitHub. Replace `<URL>` and `<NAME>` before sending.
 > 2. Inspecting the build system: autotools (`configure.ac`), CMake (`CMakeLists.txt`), or plain Makefile. Set `commands` accordingly with ASan + UBSan:
 >    - Autotools: `./configure` then `make CC=clang CFLAGS='-O1 -g -fno-omit-frame-pointer -fsanitize=address,undefined' LDFLAGS='-fsanitize=address,undefined'`.
 >    - If the project's Makefile hard-codes CFLAGS and breaks on override (libtommath in dropbear is the canonical example), use `MORECFLAGS`/`MORELDFLAGS` or any append-only knob the project exposes.
->    - CMake: `cmake -B build -DCMAKE_C_COMPILER=clang -DCMAKE_C_FLAGS='-O1 -g -fno-omit-frame-pointer -fsanitize=address,undefined' -DCMAKE_EXE_LINKER_FLAGS='-fsanitize=address,undefined'` then `cmake --build build -j$(nproc)`. Set `symbols.object_glob = "build/**/*.o"`.
+>    - CMake: `cmake -B build -DCMAKE_C_COMPILER=clang -DCMAKE_C_FLAGS='-O1 -g -fno-omit-frame-pointer -fsanitize=address,undefined' -DCMAKE_EXE_LINKER_FLAGS='-fsanitize=address,undefined'` then `cmake --build build -j$(nproc)`.
 > 3. Adding required build packages to `apt_packages` (grep `configure.ac` / `CMakeLists.txt` / `README` for `pkg-config`/`find_package`/`apt install` hints).
-> 4. Setting `symbols.source_exts` to include `.cc`, `.cpp`, or `.cxx` if the project is C++.
 >
 > Do NOT write a Dockerfile — the setup CLI will render one. After writing
 > the TOML, tell me to run `python3 harness/setup_cli.py setup <NAME>` and
