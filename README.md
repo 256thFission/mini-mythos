@@ -10,7 +10,7 @@
 </p>
 
 <blockquote>
-<sub>*AGI not included, results may vary, side effects may inlcude the end of all software, ludicrous api bills and/or anthropic account bans</sub> <br/>
+<sub>*AGI not included, results may vary, side effects may include the end of all software, ludicrous API bills and/or Anthropic account bans</sub> <br/>
 <sub>(probably not but I wouldn't say never ;-;)</sub>
 </blockquote>
 <hr>
@@ -35,19 +35,16 @@ As for it working, early results are positive.
 View [Current Progress](#current-progress) to read current progress & yapping. 
 
 
-## Quickstart
-
+## Quickstart - 1 step setup
 ### Prerequisites
 
 - Docker
-- Python 3.12+ (`pip install -r requirements.txt`)
-- [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code) authenticated (`claude /login`)
+- Python 3.11+ (`pip install -r requirements.txt`)
+- [Claude Code CLI](https://docs.anthropic.com/en/docs/claude-code) 
 
 ### 1. Configure your target
 
-Create `targets/<name>/target.toml` — this is the **only** file you need to
-write. See `@docs/ADD_NEW_TARGET.md` for the full schema and a Cursor prompt
-that fills it in from a GitHub URL.
+Create `targets/<name>/target.toml` 
 
 ```toml
 [project]
@@ -79,26 +76,20 @@ python3 harness/setup_cli.py setup myproject
 
 That renders `targets/myproject/Dockerfile` from `docker/Dockerfile.tmpl`,
 builds the image, starts the container, and copies `reachable_symbols.json`
-to `runs/targets/myproject/`. Re-run any time you change `target.toml`.
+to `runs/targets/myproject/`.
 
-**Escape hatch:** if your project can't fit the template (exotic base image,
-multi-stage build, patches), drop a hand-written `targets/<name>/Dockerfile`
-in place. `setup_cli` detects it and uses it verbatim.
-
-**Pitfall:** if the project's Makefile hard-codes `CFLAGS`/`LDFLAGS` and
-breaks on override (e.g. dropbear's bundled libtommath), use the append-only
-knob the project exposes — usually `MORECFLAGS` / `MORELDFLAGS`.
+**WARNING:** If your project needs exotic build steps (custom base image,
+multi-stage build, pre-build patches), Your're on your own. Write to `targets/<name>/Dockerfile`. The setup CLI detects it, Use `--force-render` to overwrite.
 
 ### 3. Run
 
 ```bash
-python3 -u harness/orchestrator.py --target myproject
+python3 -u harness/orchestrator.py
 ```
-
-**Flags:**
 
 | Flag | Purpose |
 |---|---|
+| `--target NAME` | Target to audit (auto-detected if only one exists) |
 | `--max-runs N` | Stop after N audit runs |
 | `--dry-run` | Score files and print queue — skips audit runs  |
 | `--skip-docker` | Skip Gate A trigger execution |
@@ -131,24 +122,6 @@ rm runs/targets/myproject/scores.json
 
 ---
 
-## Architecture
-
-```
-orchestrator.py          main loop
-  preprocessor.py        dead-code filter (tree-sitter + symbol table)
-  scorer.py              LLM file scoring (host-side Claude)
-  runner.py              audit agent dispatch (docker exec claude)
-  validator.py           Gate B: independent judge agent
-  verifier.py            Gate A: trigger execution + sanitizer check
-  budget.py              hard spend cap enforcement
-  config.py              all settings (models, timeouts, budgets)
-  prompts/
-    score.txt            file scoring prompt
-    audit.txt            audit agent prompt
-    judge.txt            judge agent prompt
-```
-
-
 ## Current Progress
 
 So far, I've worked with [miniupnpd](https://github.com/miniupnp/miniupnp) as a test repo, and managed to recreate historic CVEs on older checkouts.
@@ -167,4 +140,4 @@ Experimenting with better harnesses to test current model capabilities seems pro
 - Patch churn targeting
 - Adding wrappers for Codex and OpenCode to benchmark performance against Claude
 
-Obviously, PRs and issues welcome. See [Contributing](#contributing).
+Obviously, PRs and issues welcome.
