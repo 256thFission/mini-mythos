@@ -81,10 +81,8 @@ def _load_prompt(
     dead_fn_annotation: str = "",
 ) -> str:
     template = AUDIT_PROMPT_PATH.read_text()
-    if target.binaries:
-        binaries_block = "\n".join(f"  - {p}" for p in target.binaries)
-    else:
-        binaries_block = "  (none declared — inspect the build tree to find them)"
+    # [binaries].paths is required by load_target, so target.binaries is non-empty.
+    binaries_block = "\n".join(f"  - {p}" for p in target.binaries)
     prompt = (
         template
         .replace("{filename}", filename)
@@ -375,7 +373,7 @@ def run_audit(
     if valid_payload is None:
         _log_event("forced_finalization_turn", run_id, filename, phase="audit")
         cr_final, cf, itf, otf, evf, tcf, sidf = _run_one_audit_session(
-            prompt=FORCED_FINALIZATION_TEMPLATE.format(filename=filename),
+            prompt=FORCED_FINALIZATION_TEMPLATE.replace("{filename}", filename),
             model=model,
             timeout=RUN_TIMEOUT_SEC,
             target=target,

@@ -86,6 +86,12 @@ def load_target(name: str | None = None) -> TargetConfig:
     build = raw.get("build", {})
     symbols = raw.get("symbols", {})
     binaries_tbl = raw.get("binaries", {})
+    if not isinstance(binaries_tbl, dict):
+        print(f"[config] ERROR: {toml_path} [binaries] must be a table with a 'paths' array")
+        sys.exit(1)
+    if not binaries_tbl.get("paths"):
+        print(f"[config] ERROR: {toml_path} missing [binaries].paths (list of absolute paths to pre-built instrumented binaries)")
+        sys.exit(1)
 
     # Schema is strictly defined in [build] section - no backwards compatibility
     workdir = build.get("workdir", "")

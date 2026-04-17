@@ -230,6 +230,8 @@ def _parse_stream_json(raw_stdout: str) -> dict[str, Any]:
         is cut off before its result arrives (rate-limit, forced termination).
         This just enriches the existing entry if/when the result shows up.
         """
+        if not tid:
+            return
         entry = tool_call_by_id.get(tid)
         if entry is not None:
             entry["result"] = content

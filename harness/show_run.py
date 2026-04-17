@@ -119,7 +119,9 @@ def _render_transcript(transcript_path: Path, label: str = "AUDIT", verbose: boo
                     )
                 is_error = event.get("is_error", False)
                 prefix = "[TOOL ERROR]" if is_error else "[TOOL RESULT]"
-                output = str(content) if verbose else str(content)[:500]
+                output = str(content)
+                if not verbose:
+                    output = output[:500]
                 print(f"\n{prefix}\n{output}")
 
             elif etype == "result":
