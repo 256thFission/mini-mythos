@@ -40,4 +40,12 @@ RUN useradd -m -s /bin/bash audit \
     && chown -R audit:audit {{workdir}} \
     && chown -R audit:audit /opt/minimythos
 
+# Lock *existing files* in the build tree read-only so the audit agent cannot
+# patch the Makefile, edit source, or overwrite cached .o files (which is what
+# any `make` rebuild would do first). Directories stay writable so running the
+# instrumented binaries can still create runtime artifacts inside their own
+# tree (hostkeys, lease files, PID files, unix sockets, logs). Scratch work
+# for the agent's own test programs still belongs under $HOME (/audit-home).
+RUN find {{workdir}} -type f -exec chmod a-w {} +
+
 CMD ["tail", "-f", "/dev/null"]

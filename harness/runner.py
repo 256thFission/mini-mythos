@@ -5,7 +5,6 @@ Uses --output-format stream-json to get per-event records.
 """
 
 import json
-import subprocess
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -67,10 +66,11 @@ prove it empirically with tool output.
 ---
 """
 
-FORCED_FINALIZATION_PROMPT = (
-    "Finalization turn. Stop investigation now. "
-    "Do not run additional exploratory actions. "
-    "Call submit_audit_report immediately with your best final payload."
+FORCED_FINALIZATION_TEMPLATE = (
+    "Finalization turn for audit of `{filename}`. Stop investigation now. "
+    "Do not run additional exploratory actions, do not read git history, do not "
+    "analyze other files. Call submit_audit_report immediately with your best "
+    "final payload summarizing what you found (or didn't find) in `{filename}`."
 )
 
 
@@ -81,12 +81,17 @@ def _load_prompt(
     dead_fn_annotation: str = "",
 ) -> str:
     template = AUDIT_PROMPT_PATH.read_text()
+    if target.binaries:
+        binaries_block = "\n".join(f"  - {p}" for p in target.binaries)
+    else:
+        binaries_block = "  (none declared — inspect the build tree to find them)"
     prompt = (
         template
         .replace("{filename}", filename)
         .replace("{project_name}", target.name)
         .replace("{project_description}", target.description)
         .replace("{source_dir}", target.container_workdir)
+        .replace("{binaries}", binaries_block)
         .replace("{dead_functions}", dead_fn_annotation)
     )
     if retry_handoff:
@@ -139,10 +144,17 @@ def _extract_submit_payload(tool_calls: list[dict]) -> dict | None:
     MCP-registered tools.
     """
     for tc in reversed(tool_calls):
-        if tc.get("name") in _SUBMIT_AUDIT_TOOL_NAMES:
-            payload = tc.get("input")
-            if isinstance(payload, dict):
-                return payload
+        if tc.get("name") not in _SUBMIT_AUDIT_TOOL_NAMES:
+            continue
+        # Skip submits the MCP server explicitly rejected — those are not real
+        # submissions. A submit whose result never came back (entry still has
+        # the default is_error=False placeholder) is still considered, since
+        # stream-json can cut off before the result arrives.
+        if tc.get("is_error"):
+            continue
+        payload = tc.get("input")
+        if isinstance(payload, dict):
+            return payload
     return None
 
 
@@ -211,13 +223,10 @@ def run_audit(
         dead_fn_annotation=dead_fn_annotation,
     )
 
-    # Reset container workdir to clean state before each run so test artifacts
-    # from prior runs don't bias the agent toward already-explored paths.
-    subprocess.run(
-        ["docker", "exec", target.container_name, "bash", "-c",
-         f"cd {target.container_workdir} && git clean -fdx --quiet"],
-        capture_output=True,
-    )
+    # No need to reset the workdir between runs: the build tree is mounted
+    # read-only (see docker/Dockerfile.tmpl) and the audit user cannot create
+    # files inside it, so there is nothing to clean. Scratch work lives under
+    # /audit-home, which each run treats as ephemeral.
 
     start = time.time()
     total_cost = 0.0
@@ -338,6 +347,7 @@ def run_audit(
                     timeout=RUN_TIMEOUT_SEC,
                     target=target,
                     claude_home=claude_home,
+                    resume_session_id=accumulated_session_id or None,
                 )
                 total_cost += c2
                 total_in_tok += it2
@@ -365,11 +375,12 @@ def run_audit(
     if valid_payload is None:
         _log_event("forced_finalization_turn", run_id, filename, phase="audit")
         cr_final, cf, itf, otf, evf, tcf, sidf = _run_one_audit_session(
-            prompt=FORCED_FINALIZATION_PROMPT,
+            prompt=FORCED_FINALIZATION_TEMPLATE.format(filename=filename),
             model=model,
             timeout=RUN_TIMEOUT_SEC,
             target=target,
             claude_home=claude_home,
+            resume_session_id=accumulated_session_id or None,
         )
         total_cost += cf
         total_in_tok += itf

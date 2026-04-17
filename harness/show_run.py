@@ -71,7 +71,7 @@ def list_runs(audit_log: Path) -> None:
           f"  |  Log: {audit_log}")
 
 
-def _render_transcript(transcript_path: Path, label: str = "AUDIT") -> None:
+def _render_transcript(transcript_path: Path, label: str = "AUDIT", verbose: bool = False) -> None:
     print(f"[{label} TRANSCRIPT] {transcript_path.name}\n{'='*80}")
     with open(transcript_path) as f:
         for line in f:
@@ -98,11 +98,16 @@ def _render_transcript(transcript_path: Path, label: str = "AUDIT") -> None:
                     if btype == "text":
                         print(f"\n[ASSISTANT TEXT]\n{block.get('text', '')}")
                     elif btype == "thinking":
-                        thinking = block.get("thinking", "")[:500]
-                        print(f"\n[THINKING (truncated)]\n{thinking}...")
+                        thinking = block.get("thinking", "")
+                        if verbose:
+                            print(f"\n[THINKING]\n{thinking}")
+                        else:
+                            print(f"\n[THINKING (truncated)]\n{thinking[:500]}...")
                     elif btype == "tool_use":
                         name = _strip_mcp_prefix(block.get("name", "?"))
-                        inp = json.dumps(block.get("input", {}))[:300]
+                        inp = json.dumps(block.get("input", {}))
+                        if not verbose:
+                            inp = inp[:300]
                         print(f"\n[TOOL CALL] {name}\n  input: {inp}")
 
             elif etype == "tool_result":
@@ -114,7 +119,8 @@ def _render_transcript(transcript_path: Path, label: str = "AUDIT") -> None:
                     )
                 is_error = event.get("is_error", False)
                 prefix = "[TOOL ERROR]" if is_error else "[TOOL RESULT]"
-                print(f"\n{prefix}\n{str(content)[:500]}")
+                output = str(content) if verbose else str(content)[:500]
+                print(f"\n{prefix}\n{output}")
 
             elif etype == "result":
                 cost = event.get("total_cost_usd", 0)
@@ -127,14 +133,16 @@ def _render_transcript(transcript_path: Path, label: str = "AUDIT") -> None:
                 calls = event.get("tool_calls", [])
                 print(f"\n[TOOL SUMMARY] {len(calls)} tool calls:")
                 for i, tc in enumerate(calls, 1):
-                    inp = json.dumps(tc.get("input", {}))[:100]
+                    inp = json.dumps(tc.get("input", {}))
+                    if not verbose:
+                        inp = inp[:100]
                     print(f"  {i}. {_strip_mcp_prefix(tc.get('name','?'))}  input={inp}")
 
             elif etype not in ("system", "user", "raw_line"):
                 print(f"\n[{etype.upper()}] {json.dumps(event)[:200]}")
 
 
-def show_transcript(run_id_prefix: str, transcripts_dir: Path) -> None:
+def show_transcript(run_id_prefix: str, transcripts_dir: Path, verbose: bool = False) -> None:
     matches = list(transcripts_dir.glob(f"*{run_id_prefix}*.jsonl"))
     if not matches:
         print(f"No audit transcript found for prefix: {run_id_prefix}")
@@ -142,10 +150,10 @@ def show_transcript(run_id_prefix: str, transcripts_dir: Path) -> None:
     if len(matches) > 1:
         print(f"Multiple matches: {[m.name for m in matches]}")
         return
-    _render_transcript(matches[0], label="AUDIT")
+    _render_transcript(matches[0], label="AUDIT", verbose=verbose)
 
 
-def show_judge_transcript(run_id_prefix: str, judge_transcripts_dir: Path) -> None:
+def show_judge_transcript(run_id_prefix: str, judge_transcripts_dir: Path, verbose: bool = False) -> None:
     matches = list(judge_transcripts_dir.glob(f"*{run_id_prefix}*.jsonl"))
     if not matches:
         print(f"No judge transcript found for prefix: {run_id_prefix}")
@@ -153,7 +161,7 @@ def show_judge_transcript(run_id_prefix: str, judge_transcripts_dir: Path) -> No
     if len(matches) > 1:
         print(f"Multiple matches: {[m.name for m in matches]}")
         return
-    _render_transcript(matches[0], label="JUDGE")
+    _render_transcript(matches[0], label="JUDGE", verbose=verbose)
 
 
 def dump_log(audit_log: Path) -> None:
@@ -174,6 +182,7 @@ if __name__ == "__main__":
     )
     parser.add_argument("--log", action="store_true", help="Dump raw audit.jsonl")
     parser.add_argument("--judge", metavar="RUN_ID", help="Show judge transcript")
+    parser.add_argument("--verbose", "-v", action="store_true", help="Show full thinking blocks and tool I/O without truncation")
     parser.add_argument("run_id", nargs="?", help="Show audit transcript for this run_id prefix")
     pargs = parser.parse_args()
 
@@ -186,8 +195,8 @@ if __name__ == "__main__":
     if pargs.log:
         dump_log(audit_log)
     elif pargs.judge:
-        show_judge_transcript(pargs.judge, judge_transcripts_dir)
+        show_judge_transcript(pargs.judge, judge_transcripts_dir, verbose=pargs.verbose)
     elif pargs.run_id:
-        show_transcript(pargs.run_id, transcripts_dir)
+        show_transcript(pargs.run_id, transcripts_dir, verbose=pargs.verbose)
     else:
         list_runs(audit_log)

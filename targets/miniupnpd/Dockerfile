@@ -41,4 +41,10 @@ RUN useradd -m -s /bin/bash audit \
     && chown -R audit:audit /opt/miniupnp \
     && chown -R audit:audit /opt/minimythos
 
+# Lock *existing files* read-only so the audit agent cannot patch the
+# Makefile, edit source, or overwrite cached .o files (which any `make`
+# rebuild does first). Directories stay writable so miniupnpd can still
+# create its lease file / PID file / unix socket inside its tree at runtime.
+RUN find /opt/miniupnp -type f -exec chmod a-w {} +
+
 CMD ["tail", "-f", "/dev/null"]

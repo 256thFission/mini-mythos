@@ -217,10 +217,23 @@ def _parse_stream_json(raw_stdout: str) -> dict[str, Any]:
     cost_usd = 0.0
     input_tokens = 0
     output_tokens = 0
-    tool_calls = []
+    tool_calls: list[dict] = []
+    tool_call_by_id: dict[str, dict] = {}
     result_subtype = ""
     session_id = ""
-    pending_tool_uses: dict[str, dict] = {}
+
+    def _record_tool_result(tid: str, content: Any, is_error: bool) -> None:
+        """Attach a tool_result to its already-recorded tool_use entry.
+
+        Tool calls are emitted when the assistant first issues them (see
+        ``tool_use`` handling below), so a call is captured even if the stream
+        is cut off before its result arrives (rate-limit, forced termination).
+        This just enriches the existing entry if/when the result shows up.
+        """
+        entry = tool_call_by_id.get(tid)
+        if entry is not None:
+            entry["result"] = content
+            entry["is_error"] = is_error
 
     for line in raw_stdout.splitlines():
         line = line.strip()
@@ -242,21 +255,36 @@ def _parse_stream_json(raw_stdout: str) -> dict[str, Any]:
                     full_text_parts.append(block.get("text", ""))
                 elif btype == "tool_use":
                     tid = block.get("id", "")
-                    pending_tool_uses[tid] = {
+                    entry = {
+                        "tool_use_id": tid,
                         "name": block.get("name", ""),
                         "input": block.get("input", {}),
+                        "result": None,
+                        "is_error": False,
                     }
+                    tool_calls.append(entry)
+                    if tid:
+                        tool_call_by_id[tid] = entry
+
+        elif etype == "user":
+            # Current Claude Code stream-json nests tool_result blocks inside
+            # user messages; older formats emitted them as top-level events.
+            content = event.get("message", {}).get("content", [])
+            if isinstance(content, list):
+                for block in content:
+                    if isinstance(block, dict) and block.get("type") == "tool_result":
+                        _record_tool_result(
+                            block.get("tool_use_id", ""),
+                            block.get("content", ""),
+                            bool(block.get("is_error", False)),
+                        )
 
         elif etype == "tool_result":
-            tid = event.get("tool_use_id", "")
-            tool_info = pending_tool_uses.pop(tid, {})
-            tool_calls.append({
-                "tool_use_id": tid,
-                "name": tool_info.get("name", "unknown"),
-                "input": tool_info.get("input", {}),
-                "result": event.get("content", ""),
-                "is_error": event.get("is_error", False),
-            })
+            _record_tool_result(
+                event.get("tool_use_id", ""),
+                event.get("content", ""),
+                bool(event.get("is_error", False)),
+            )
 
         elif etype == "result":
             cost_usd = float(event.get("total_cost_usd", 0.0) or 0.0)

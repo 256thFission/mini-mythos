@@ -26,3 +26,14 @@ commands = [
 # (Earlier dropbear builds were flat — so "*.o" / "src/*.c" varies by commit.)
 object_glob = "obj/*.o"
 source_exts = [".c"]
+
+[binaries]
+# Pre-built, ASan/UBSan-instrumented binaries. Rendered into the audit prompt
+# so the agent runs them directly instead of trying to rebuild the tree.
+paths = [
+    "/opt/dropbear/dropbear",
+    "/opt/dropbear/dbclient",
+    "/opt/dropbear/dropbearkey",
+    "/opt/dropbear/dropbearconvert",
+    "/opt/dropbear/scp",
+]

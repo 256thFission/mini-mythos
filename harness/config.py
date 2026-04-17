@@ -41,6 +41,10 @@ class TargetConfig:
     build_commands: tuple[str, ...] = ()
     symbols_object_glob: str = "*.o"
     symbols_source_exts: tuple[str, ...] = (".c",)
+    # Absolute paths (inside the container) of pre-built, ASan/UBSan-instrumented
+    # binaries the audit agent should run directly. Rendered into the audit
+    # prompt so the agent doesn't waste turns rebuilding.
+    binaries: tuple[str, ...] = ()
 
 
 def load_target(name: str | None = None) -> TargetConfig:
@@ -81,6 +85,7 @@ def load_target(name: str | None = None) -> TargetConfig:
     project = raw.get("project", {})
     build = raw.get("build", {})
     symbols = raw.get("symbols", {})
+    binaries_tbl = raw.get("binaries", {})
 
     # Schema is strictly defined in [build] section - no backwards compatibility
     workdir = build.get("workdir", "")
@@ -107,6 +112,7 @@ def load_target(name: str | None = None) -> TargetConfig:
         build_commands=tuple(commands),
         symbols_object_glob=symbols.get("object_glob", "*.o"),
         symbols_source_exts=tuple(symbols.get("source_exts", [".c"])),
+        binaries=tuple(binaries_tbl.get("paths", [])),
     )
 
 
